@@ -230,3 +230,22 @@ fn render_compute(f: &mut Frame, area: Rect, nodes: &[Node]) {
         area,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn renders_trace_and_selection() {
+        let nodes = trace();
+        let mut sel = ListState::default().with_selected(Some(3));
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| draw(f, &nodes, &mut sel)).unwrap();
+
+        let text: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("Token::transfer"));
+        assert!(text.contains("Token Program"));
+        assert!(text.contains("8420 CU"));
+    }
+}
