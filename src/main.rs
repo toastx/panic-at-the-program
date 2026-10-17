@@ -8,13 +8,13 @@ use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_ra
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph};
 
-use solana::{Node, Status, Tx};
+use solana::{Node, Status, Summary, Tx};
 
 struct App {
     cluster: String,
     tx: Option<Tx>,
     trace: ListState,
-    history: Vec<String>,
+    history: Vec<Summary>,
     history_state: ListState,
     message: String,
 }
@@ -26,7 +26,7 @@ impl App {
             Ok(value) => {
                 self.tx = Some(solana::parse(signature, &self.cluster, &value));
                 self.trace.select(Some(0));
-                self.history = solana::cached();
+                self.history = solana::summaries();
                 self.message.clear();
             }
             Err(err) => self.message = err.to_string(),
@@ -43,7 +43,7 @@ fn main() -> io::Result<()> {
         cluster,
         tx: None,
         trace: ListState::default().with_selected(Some(0)),
-        history: solana::cached(),
+        history: solana::summaries(),
         history_state: ListState::default().with_selected(Some(0)),
         message: String::new(),
     };
@@ -70,11 +70,16 @@ fn main() -> io::Result<()> {
             KeyCode::Up | KeyCode::Char('k') => list.select_previous(),
             KeyCode::Char('h') | KeyCode::Esc => {
                 app.tx = None;
-                app.history = solana::cached();
+                app.history = solana::summaries();
             }
             KeyCode::Enter => {
                 if app.tx.is_none() {
-                    if let Some(signature) = app.history_state.selected().and_then(|i| app.history.get(i)).cloned() {
+                    if let Some(signature) = app
+                        .history_state
+                        .selected()
+                        .and_then(|i| app.history.get(i))
+                        .map(|s| s.signature.clone())
+                    {
                         app.open(&signature);
                     }
                 }
@@ -125,7 +130,18 @@ fn draw_history(f: &mut Frame, app: &mut App) {
         rows[0],
     );
 
-    let items: Vec<ListItem> = app.history.iter().map(|s| ListItem::new(s.as_str())).collect();
+    let items: Vec<ListItem> = app
+        .history
+        .iter()
+        .map(|s| {
+            ListItem::new(Line::from(vec![
+                mark(s.status),
+                Span::raw(format!(" {:<16}", short(&s.signature))),
+                Span::styled(format!("{:>3} ix   ", s.instructions), dim()),
+                Span::raw(format!("{:>7.1}k CU", s.cu as f64 / 1000.0)),
+            ]))
+        })
+        .collect();
     let items = if items.is_empty() {
         vec![ListItem::new(Span::styled("no cached transactions — run: solwork <signature> [cluster]", dim()))]
     } else {

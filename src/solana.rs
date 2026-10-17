@@ -60,6 +60,31 @@ pub fn cached() -> Vec<String> {
     entries.into_iter().map(|(_, sig)| sig).collect()
 }
 
+pub struct Summary {
+    pub signature: String,
+    pub status: Status,
+    pub cu: u32,
+    pub instructions: usize,
+}
+
+pub fn summaries() -> Vec<Summary> {
+    cached()
+        .into_iter()
+        .map(|signature| match load(&signature) {
+            Some(value) => {
+                let tx = parse(&signature, "", &value);
+                Summary {
+                    signature,
+                    status: tx.status,
+                    cu: tx.cu,
+                    instructions: tx.nodes.iter().filter(|n| n.depth == 0).count(),
+                }
+            }
+            None => Summary { signature, status: Status::Ok, cu: 0, instructions: 0 },
+        })
+        .collect()
+}
+
 pub fn load(signature: &str) -> Option<Value> {
     let bytes = fs::read(cache_path(signature)).ok()?;
     serde_json::from_slice(&zstd::decode_all(&bytes[..]).ok()?).ok()
