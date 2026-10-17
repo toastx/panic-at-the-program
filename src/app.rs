@@ -3,13 +3,14 @@ use std::collections::HashSet;
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 
-use crate::solana::{self, AccountInfo, Summary, Tx};
+use crate::solana::{self, AccountInfo, Entry, Kind, Tx};
 
 pub const CLUSTERS: [&str; 4] = ["mainnet", "devnet", "testnet", "localnet"];
 
 #[derive(Clone, PartialEq)]
 pub enum Click {
     Workspace(Screen),
+    Entry(usize),
     ClusterMenu,
     Cluster(&'static str),
     Explorer,
@@ -24,38 +25,44 @@ pub struct Hit {
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Screen {
-    History,
     Overview,
     Execution,
     Accounts,
     StateDiff,
     Logs,
+    Info,
+    Data,
     Raw,
-    Account,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 8] = [
-        Screen::History,
+    pub const TX: [Screen; 6] = [
         Screen::Overview,
         Screen::Execution,
         Screen::Accounts,
         Screen::StateDiff,
         Screen::Logs,
         Screen::Raw,
-        Screen::Account,
     ];
+    pub const ACCOUNT: [Screen; 3] = [Screen::Info, Screen::Data, Screen::Raw];
 
     pub fn title(&self) -> &'static str {
         match self {
-            Screen::History => "History",
             Screen::Overview => "Overview",
             Screen::Execution => "Execution",
             Screen::Accounts => "Accounts",
             Screen::StateDiff => "State Diff",
             Screen::Logs => "Logs",
-            Screen::Raw => "Raw Data",
-            Screen::Account => "Account Info",
+            Screen::Info => "Info",
+            Screen::Data => "Data",
+            Screen::Raw => "Raw",
+        }
+    }
+
+    pub fn for_kind(kind: Kind) -> &'static [Screen] {
+        match kind {
+            Kind::Tx => &Screen::TX,
+            Kind::Account => &Screen::ACCOUNT,
         }
     }
 }
@@ -71,11 +78,13 @@ pub struct App {
     pub cluster: String,
     pub tx: Option<Tx>,
     pub screen: Screen,
-    pub nav_index: usize,
+    pub kind: Kind,
+    pub entries: Vec<Entry>,
+    pub entry_index: usize,
     pub focus_nav: bool,
     pub list: ListState,
     pub collapsed: HashSet<usize>,
-    pub history: Vec<Summary>,
+
     pub mode: Mode,
     pub search: String,
     pub message: String,
@@ -91,11 +100,12 @@ pub struct App {
 impl App {
     pub fn new(cluster: String) -> Self {
         App {
-            history: solana::summaries(&cluster),
+            entries: solana::entries(&cluster),
             cluster,
             tx: None,
-            screen: Screen::History,
-            nav_index: 0,
+            screen: Screen::Overview,
+            kind: Kind::Tx,
+            entry_index: 0,
             focus_nav: false,
             list: ListState::default().with_selected(Some(0)),
             collapsed: HashSet::new(),
@@ -125,9 +135,10 @@ impl App {
             Ok(value) => {
                 self.tx = Some(solana::parse(signature, &self.cluster, &value));
                 self.collapsed.clear();
+                self.kind = Kind::Tx;
+                self.goto(Screen::Overview);
                 self.refresh_history();
                 self.message.clear();
-                self.goto(Screen::Overview);
             }
             Err(err) => self.message = format!("{signature}: {err}"),
         }
@@ -137,15 +148,29 @@ impl App {
         match solana::fetch_account(&self.cluster, pubkey) {
             Ok(value) => {
                 self.account = Some(solana::parse_account(pubkey, &value));
+                self.kind = Kind::Account;
+                self.goto(Screen::Info);
+                self.refresh_history();
                 self.message.clear();
-                self.goto(Screen::Account);
             }
             Err(err) => self.message = format!("{pubkey}: {err}"),
         }
     }
 
     pub fn refresh_history(&mut self) {
-        self.history = solana::summaries(&self.cluster);
+        self.entries = solana::entries(&self.cluster);
+        if let Some(index) = self.loaded_key().and_then(|key| {
+            self.entries.iter().position(|e| e.key == key)
+        }) {
+            self.entry_index = index;
+        }
+    }
+
+    pub fn loaded_key(&self) -> Option<String> {
+        match self.kind {
+            Kind::Tx => self.tx().map(|tx| tx.signature.clone()),
+            Kind::Account => self.account.as_ref().map(|a| a.key.clone()),
+        }
     }
 
     pub fn toggle_cluster_menu(&mut self) {
@@ -170,12 +195,9 @@ impl App {
     }
 
     pub fn explorer_target(&self) -> Option<(String, String)> {
-        match self.screen {
-            Screen::Account => self
-                .account
-                .as_ref()
-                .map(|a| ("address".to_string(), a.key.clone())),
-            _ => self.tx().map(|tx| ("tx".to_string(), tx.signature.clone())),
+        match self.kind {
+            Kind::Account => self.account.as_ref().map(|a| ("address".to_string(), a.key.clone())),
+            Kind::Tx => self.tx().map(|tx| ("tx".to_string(), tx.signature.clone())),
         }
     }
 
@@ -214,16 +236,10 @@ impl App {
             Some(Click::Row(index)) => {
                 self.focus_nav = false;
                 self.list.select(Some(index));
-                if self.screen == Screen::History {
-                    if let Some(signature) = self
-                        .history_rows()
-                        .get(index)
-                        .and_then(|&i| self.history.get(i))
-                        .map(|s| s.signature.clone())
-                    {
-                        self.open_transaction(&signature);
-                    }
-                }
+            }
+            Some(Click::Entry(index)) => {
+                self.focus_nav = true;
+                self.open_entry(index);
             }
             Some(Click::Inspect(key)) => self.open_account(&key),
             None => self.cluster_menu = false,
@@ -236,9 +252,32 @@ impl App {
 
     pub fn goto(&mut self, screen: Screen) {
         self.screen = screen;
-        self.nav_index = Screen::ALL.iter().position(|s| *s == screen).unwrap_or(0);
         self.list.select(Some(0));
         self.scroll = 0;
+    }
+
+    pub fn screens(&self) -> &'static [Screen] {
+        Screen::for_kind(self.kind)
+    }
+
+    pub fn screen_index(&self) -> usize {
+        self.screens().iter().position(|s| *s == self.screen).unwrap_or(0)
+    }
+
+    pub fn cycle_screen(&mut self, delta: isize) {
+        let screens = self.screens();
+        let next = (self.screen_index() as isize + delta).rem_euclid(screens.len() as isize) as usize;
+        self.goto(screens[next]);
+    }
+
+    pub fn open_entry(&mut self, index: usize) {
+        let Some(entry) = self.entries.get(index) else { return };
+        self.entry_index = index;
+        let (kind, key) = (entry.kind, entry.key.clone());
+        match kind {
+            Kind::Tx => self.open_transaction(&key),
+            Kind::Account => self.open_account(&key),
+        }
     }
 
     pub fn visible_nodes(&self) -> Vec<usize> {
@@ -269,15 +308,6 @@ impl App {
 
     pub fn matches(&self, text: &str) -> bool {
         self.search.is_empty() || text.to_lowercase().contains(&self.search.to_lowercase())
-    }
-
-    pub fn history_rows(&self) -> Vec<usize> {
-        self.history
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| self.matches(&s.signature))
-            .map(|(i, _)| i)
-            .collect()
     }
 
     pub fn account_rows(&self) -> Vec<usize> {
@@ -321,12 +351,11 @@ impl App {
 
     pub fn rows(&self) -> usize {
         match self.screen {
-            Screen::History => self.history_rows().len(),
             Screen::Execution | Screen::Overview => self.visible_nodes().len(),
             Screen::Accounts => self.account_rows().len(),
             Screen::StateDiff => self.balance_rows().len(),
             Screen::Logs => self.log_rows().len(),
-            Screen::Raw | Screen::Account => 0,
+            Screen::Raw | Screen::Info | Screen::Data => 0,
         }
     }
 

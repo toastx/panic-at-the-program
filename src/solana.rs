@@ -81,28 +81,53 @@ pub fn cached(cluster: &str) -> Vec<String> {
     entries.into_iter().map(|(_, key)| key).collect()
 }
 
-pub struct Summary {
-    pub signature: String,
-    pub status: Status,
-    pub cu: u32,
-    pub instructions: usize,
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Kind {
+    Tx,
+    Account,
 }
 
-pub fn summaries(cluster: &str) -> Vec<Summary> {
+pub struct Entry {
+    pub kind: Kind,
+    pub key: String,
+    pub status: Option<Status>,
+    pub detail: String,
+}
+
+pub fn entries(cluster: &str) -> Vec<Entry> {
     cached(cluster)
         .into_iter()
-        .filter(|key| !key.starts_with("account-"))
-        .map(|signature| match load(cluster, &signature) {
-            Some(value) => {
-                let tx = parse(&signature, cluster, &value);
-                Summary {
-                    signature,
-                    status: tx.status,
-                    cu: tx.cu,
-                    instructions: tx.nodes.iter().filter(|n| n.depth == 0).count(),
+        .map(|key| match key.strip_prefix("account-") {
+            Some(pubkey) => {
+                let account = load(cluster, &key).map(|value| parse_account(pubkey, &value));
+                Entry {
+                    kind: Kind::Account,
+                    detail: account.map_or_else(
+                        || "cached".to_string(),
+                        |a| format!("{:>5} B  {}", a.data.len(), a.owner_name()),
+                    ),
+                    key: pubkey.to_string(),
+                    status: None,
                 }
             }
-            None => Summary { signature, status: Status::Ok, cu: 0, instructions: 0 },
+            None => {
+                let tx = load(cluster, &key).map(|value| parse(&key, cluster, &value));
+                Entry {
+                    kind: Kind::Tx,
+                    detail: tx.as_ref().map_or_else(
+                        || "cached".to_string(),
+                        |tx| {
+                            format!(
+                                "{:>2} ix  {:>9} CU",
+                                tx.nodes.iter().filter(|n| n.depth == 0).count(),
+                                tx.cu
+                            )
+                        },
+                    ),
+                    status: tx.map(|tx| tx.status),
+                    key,
+                }
+            }
         })
         .collect()
 }
@@ -532,4 +557,188 @@ fn base64_decode(input: &str) -> Vec<u8> {
 
 pub fn is_signature(input: &str) -> bool {
     input.len() >= 80
+}
+
+const BS58: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+pub fn bs58_encode(bytes: &[u8]) -> String {
+    let mut digits: Vec<u8> = Vec::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let mut carry = *byte as usize;
+        for digit in digits.iter_mut() {
+            carry += (*digit as usize) << 8;
+            *digit = (carry % 58) as u8;
+            carry /= 58;
+        }
+        while carry > 0 {
+            digits.push((carry % 58) as u8);
+            carry /= 58;
+        }
+    }
+    let leading = bytes.iter().take_while(|b| **b == 0).count();
+    let mut out = String::from("1".repeat(leading));
+    out.extend(digits.iter().rev().map(|d| BS58[*d as usize] as char));
+    if out.is_empty() { "1".to_string() } else { out }
+}
+
+pub fn bs58_decode(input: &str) -> Vec<u8> {
+    let mut bytes: Vec<u8> = Vec::new();
+    for c in input.chars() {
+        let Some(value) = BS58.iter().position(|b| *b as char == c) else { continue };
+        let mut carry = value;
+        for byte in bytes.iter_mut() {
+            carry += (*byte as usize) * 58;
+            *byte = (carry & 0xff) as u8;
+            carry >>= 8;
+        }
+        while carry > 0 {
+            bytes.push((carry & 0xff) as u8);
+            carry >>= 8;
+        }
+    }
+    bytes.extend(std::iter::repeat_n(0u8, input.chars().take_while(|c| *c == '1').count()));
+    bytes.reverse();
+    bytes
+}
+
+fn u64_at(data: &[u8], offset: usize) -> u64 {
+    data.get(offset..offset + 8)
+        .map(|slice| u64::from_le_bytes(slice.try_into().unwrap_or([0; 8])))
+        .unwrap_or(0)
+}
+
+fn key_at(data: &[u8], offset: usize) -> String {
+    data.get(offset..offset + 32).map(bs58_encode).unwrap_or_default()
+}
+
+fn option_key(data: &[u8], offset: usize) -> String {
+    match data.get(offset..offset + 4).map(|t| u32::from_le_bytes(t.try_into().unwrap_or([0; 4]))) {
+        Some(1) => key_at(data, offset + 4),
+        _ => "none".to_string(),
+    }
+}
+
+pub fn decode_account(account: &AccountInfo) -> Option<(&'static str, Vec<(String, String)>)> {
+    let data = &account.data;
+    let token = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+    let token22 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+    if account.owner != token && account.owner != token22 {
+        return None;
+    }
+    match data.len() {
+        82 => Some((
+            "SPL Mint",
+            vec![
+                ("mint_authority".into(), option_key(data, 0)),
+                ("supply".into(), u64_at(data, 36).to_string()),
+                ("decimals".into(), data[44].to_string()),
+                ("is_initialized".into(), (data[45] == 1).to_string()),
+                ("freeze_authority".into(), option_key(data, 46)),
+            ],
+        )),
+        165 => Some((
+            "SPL Token Account",
+            vec![
+                ("mint".into(), key_at(data, 0)),
+                ("owner".into(), key_at(data, 32)),
+                ("amount".into(), u64_at(data, 64).to_string()),
+                ("delegate".into(), option_key(data, 72)),
+                (
+                    "state".into(),
+                    match data[108] {
+                        0 => "uninitialized",
+                        1 => "initialized",
+                        2 => "frozen",
+                        _ => "unknown",
+                    }
+                    .to_string(),
+                ),
+                ("delegated_amount".into(), u64_at(data, 121).to_string()),
+                ("close_authority".into(), option_key(data, 129)),
+            ],
+        )),
+        _ => None,
+    }
+}
+
+pub fn decode_instruction(program: &str, data: &str) -> Option<(String, Vec<(String, String)>)> {
+    let bytes = bs58_decode(data);
+    if bytes.is_empty() {
+        return None;
+    }
+    match program {
+        "11111111111111111111111111111111" => {
+            let index = u32::from_le_bytes(bytes.get(0..4)?.try_into().ok()?);
+            let name = match index {
+                0 => "CreateAccount",
+                1 => "Assign",
+                2 => "Transfer",
+                3 => "CreateAccountWithSeed",
+                8 => "Allocate",
+                _ => "Unknown",
+            };
+            let mut fields = vec![("instruction".into(), format!("{name} ({index})"))];
+            if index == 2 {
+                fields.push(("lamports".into(), u64_at(&bytes, 4).to_string()));
+            }
+            Some((name.to_string(), fields))
+        }
+        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" | "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" => {
+            let tag = bytes[0];
+            let name = match tag {
+                0 => "InitializeMint",
+                1 => "InitializeAccount",
+                3 => "Transfer",
+                7 => "MintTo",
+                8 => "Burn",
+                9 => "CloseAccount",
+                12 => "TransferChecked",
+                _ => "Unknown",
+            };
+            let mut fields = vec![("instruction".into(), format!("{name} ({tag})"))];
+            if matches!(tag, 3 | 7 | 8 | 12) {
+                fields.push(("amount".into(), u64_at(&bytes, 1).to_string()));
+            }
+            if tag == 12 {
+                fields.push(("decimals".into(), bytes.get(9).map_or(0, |b| *b).to_string()));
+            }
+            Some((name.to_string(), fields))
+        }
+        "ComputeBudget111111111111111111111111111111" => {
+            let name = match bytes[0] {
+                2 => "SetComputeUnitLimit",
+                3 => "SetComputeUnitPrice",
+                _ => "Unknown",
+            };
+            let value = bytes
+                .get(1..5)
+                .map(|v| u32::from_le_bytes(v.try_into().unwrap_or([0; 4])))
+                .unwrap_or(0);
+            Some((name.to_string(), vec![("value".into(), value.to_string())]))
+        }
+        _ => None,
+    }
+}
+
+pub fn hex_dump(data: &[u8], offset: usize, rows: usize) -> Vec<(String, String, String)> {
+    data.chunks(16)
+        .skip(offset)
+        .take(rows)
+        .enumerate()
+        .map(|(row, chunk)| {
+            let hex = chunk
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .chunks(8)
+                .map(|half| half.join(" "))
+                .collect::<Vec<_>>()
+                .join("  ");
+            let ascii = chunk
+                .iter()
+                .map(|b| if b.is_ascii_graphic() { *b as char } else { '·' })
+                .collect();
+            (format!("{:08x}", (offset + row) * 16), hex, ascii)
+        })
+        .collect()
 }

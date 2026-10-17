@@ -13,7 +13,9 @@ use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::prelude::*;
 
-use app::{App, CLUSTERS, Click, Mode, Screen};
+use app::{App, CLUSTERS, Mode, Screen};
+#[cfg(test)]
+use app::Click;
 
 fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -151,27 +153,27 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
             app.search.clear();
             app.message.clear();
         }
-        KeyCode::Tab => app.focus_nav = !app.focus_nav,
+        KeyCode::Tab => app.cycle_screen(1),
+        KeyCode::BackTab => app.cycle_screen(-1),
+        KeyCode::Char('w') => app.focus_nav = !app.focus_nav,
         KeyCode::Char('x') => app.open_in_explorer(),
         KeyCode::Char('c') => app.toggle_cluster_menu(),
-        KeyCode::Char(c @ '1'..='8') => {
+        KeyCode::Char(c @ '1'..='6') => {
             let index = c as usize - '1' as usize;
-            app.goto(Screen::ALL[index]);
+            if let Some(screen) = app.screens().get(index).copied() {
+                app.goto(screen);
+            }
         }
         KeyCode::Down | KeyCode::Char('j') => {
             if app.focus_nav {
-                app.nav_index = (app.nav_index + 1).min(Screen::ALL.len() - 1);
-                app.goto(Screen::ALL[app.nav_index]);
-                app.focus_nav = true;
+                app.entry_index = (app.entry_index + 1).min(app.entries.len().saturating_sub(1));
             } else {
                 move_selection(app, 1);
             }
         }
         KeyCode::Up | KeyCode::Char('k') => {
             if app.focus_nav {
-                app.nav_index = app.nav_index.saturating_sub(1);
-                app.goto(Screen::ALL[app.nav_index]);
-                app.focus_nav = true;
+                app.entry_index = app.entry_index.saturating_sub(1);
             } else {
                 move_selection(app, -1);
             }
@@ -192,26 +194,16 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
                 app.focus_nav = true;
             }
         }
-        KeyCode::Enter => match app.screen {
-            Screen::History => {
-                let rows = app.history_rows();
-                if let Some(signature) = app
-                    .list
-                    .selected()
-                    .and_then(|i| rows.get(i))
-                    .and_then(|&i| app.history.get(i))
-                    .map(|s| s.signature.clone())
-                {
-                    app.open(&signature);
-                }
-            }
-            _ => {
+        KeyCode::Enter => {
+            if app.focus_nav {
+                app.open_entry(app.entry_index);
+            } else {
                 let collapsed = app.selected_node().is_some_and(|i| app.collapsed.contains(&i));
                 toggle_collapse(app, !collapsed);
             }
-        },
+        }
         KeyCode::Char('r') => {
-            if app.screen == Screen::Account {
+            if app.kind == solana::Kind::Account {
                 if let Some(key) = app.account.as_ref().map(|a| a.key.clone()) {
                     match solana::refetch_account(&app.cluster, &key) {
                         Ok(value) => app.account = Some(solana::parse_account(&key, &value)),
@@ -234,6 +226,40 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use serde_json::json;
+    use solana::Status;
+
+    fn account_fixture() -> serde_json::Value {
+        let mut data = vec![0u8; 82];
+        data[0..4].copy_from_slice(&1u32.to_le_bytes());
+        data[36..44].copy_from_slice(&21_000_000_000_000u64.to_le_bytes());
+        data[44] = 6;
+        data[45] = 1;
+        let encoded = base64_encode(&data);
+        json!({"result": {"value": {
+            "lamports": 2039280u64,
+            "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "executable": false,
+            "rentEpoch": u64::MAX,
+            "data": [encoded, "base64"]
+        }}})
+    }
+
+    fn base64_encode(bytes: &[u8]) -> String {
+        const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+            let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(TABLE[((n >> (18 - i * 6)) & 0x3f) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
 
     fn fixture() -> serde_json::Value {
         json!({"result": {
@@ -266,6 +292,7 @@ mod tests {
     fn loaded() -> App {
         let mut app = App::new("devnet".into());
         app.tx = Some(solana::parse("4vK9mP", "devnet", &fixture()));
+        app.kind = solana::Kind::Tx;
         app.goto(Screen::Execution);
         app
     }
@@ -324,13 +351,13 @@ mod tests {
     #[test]
     fn navigation_switches_workspaces_and_modes() {
         let mut app = loaded();
-        on_key(&mut app, KeyEvent::from(KeyCode::Char('5')));
+        on_key(&mut app, KeyEvent::from(KeyCode::Char('4')));
         assert!(render(&mut app, 120, 34).contains("STATE DIFF"));
-        on_key(&mut app, KeyEvent::from(KeyCode::Char('6')));
+        on_key(&mut app, KeyEvent::from(KeyCode::Char('5')));
         assert!(render(&mut app, 120, 34).contains("PROGRAM LOGS"));
         on_key(&mut app, KeyEvent::from(KeyCode::Char('o')));
-        on_key(&mut app, KeyEvent::from(KeyCode::Char('4')));
-        assert!(render(&mut app, 120, 34).contains("signature › 4"));
+        on_key(&mut app, KeyEvent::from(KeyCode::Char('7')));
+        assert!(render(&mut app, 120, 34).contains("signature › 7"));
         on_key(&mut app, KeyEvent::from(KeyCode::Esc));
         on_key(&mut app, KeyEvent::from(KeyCode::Char('?')));
         assert!(render(&mut app, 120, 34).contains("expand / collapse"));
@@ -385,6 +412,7 @@ mod tests {
         on_key(&mut app, KeyEvent::from(KeyCode::Enter));
         assert!(app.message.is_empty());
         assert!(app.tx.is_some());
+        assert!(matches!(app.mode, Mode::Normal));
     }
 
     #[test]
@@ -433,17 +461,65 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_workspace_switches_screen() {
+    fn clicking_a_tab_switches_screen() {
         let mut app = loaded();
         render(&mut app, 120, 34);
-        let nav = app
+        let tab = app
             .hits
             .iter()
             .find(|hit| hit.click == Click::Workspace(Screen::Logs))
             .map(|hit| (hit.area.x, hit.area.y))
-            .expect("workspace row is clickable");
-        app.click(nav.0, nav.1);
+            .expect("tab is clickable");
+        app.click(tab.0, tab.1);
         assert!(render(&mut app, 120, 34).contains("PROGRAM LOGS"));
+    }
+
+    #[test]
+    fn tabs_follow_the_loaded_entity_kind() {
+        let mut app = loaded();
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("1 Overview"));
+        assert!(screen.contains("5 Logs"));
+        assert!(!screen.contains("Info"));
+
+        app.account = Some(solana::parse_account("8tK4iuyx", &account_fixture()));
+        app.kind = solana::Kind::Account;
+        app.goto(Screen::Info);
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("1 Info"));
+        assert!(screen.contains("2 Data"));
+        assert!(screen.contains("3 Raw"));
+        assert!(!screen.contains("Execution"));
+    }
+
+    #[test]
+    fn sidebar_lists_entities_by_kind() {
+        let mut app = loaded();
+        app.entries = vec![
+            solana::Entry {
+                kind: solana::Kind::Tx,
+                key: "4GbWN1uNx2TH78dCtrZszmja1Jg6DW9F426S7QPt5uRa".into(),
+                status: Some(Status::Failed),
+                detail: " 6 ix  114,678 CU".into(),
+            },
+            solana::Entry {
+                kind: solana::Kind::Account,
+                key: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".into(),
+                status: None,
+                detail: "   82 B  Token Program".into(),
+            },
+        ];
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("tx:4GbW…5uRa"));
+        assert!(screen.contains("acc:EPjF…Dt1v"));
+
+        let entry = app
+            .hits
+            .iter()
+            .find(|hit| hit.click == Click::Entry(1))
+            .map(|hit| (hit.area.x, hit.area.y))
+            .expect("entry row is clickable");
+        assert!(entry.1 > 0);
     }
 
     #[test]
@@ -464,23 +540,33 @@ mod tests {
     }
 
     #[test]
-    fn account_screen_renders_balance_owner_and_hex_dump() {
+    fn account_screens_show_parsed_fields_and_raw_bytes() {
         let mut app = App::new("devnet".into());
-        let value = json!({"result": {"value": {
-            "lamports": 2039280u64,
-            "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
-            "executable": false,
-            "rentEpoch": 361u64,
-            "data": ["SGVsbG8gU29sYW5h", "base64"]
-        }}});
-        app.account = Some(solana::parse_account("8tK4iuyxABCD", &value));
-        app.goto(Screen::Account);
+        app.account = Some(solana::parse_account("8tK4iuyxABCD", &account_fixture()));
+        app.kind = solana::Kind::Account;
+        app.goto(Screen::Info);
         let screen = render(&mut app, 120, 34);
         assert!(screen.contains("0.002039280 SOL"));
         assert!(screen.contains("Token Program"));
-        assert!(screen.contains("12 bytes"));
-        assert!(screen.contains("48 65 6c 6c 6f"));
-        assert!(screen.contains("Hello·Solana"));
+        assert!(screen.contains("82 bytes"));
+        assert!(screen.contains("SPL Mint"));
+        assert!(screen.contains("decimals"));
+
+        app.goto(Screen::Data);
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("PARSED — SPL Mint"));
+        assert!(screen.contains("RAW (hex)"));
+        assert!(screen.contains("00000000"));
+    }
+
+    #[test]
+    fn instruction_data_is_shown_parsed_and_raw() {
+        let transfer = solana::bs58_encode(&[3, 64, 66, 15, 0, 0, 0, 0, 0]);
+        let decoded = solana::decode_instruction("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", &transfer);
+        let (name, fields) = decoded.expect("token transfer decodes");
+        assert_eq!(name, "Transfer");
+        assert_eq!(fields[1], ("amount".to_string(), "1000000".to_string()));
+        assert_eq!(solana::bs58_decode(&transfer), vec![3, 64, 66, 15, 0, 0, 0, 0, 0]);
     }
 
     #[test]

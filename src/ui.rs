@@ -1,7 +1,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::{App, CLUSTERS, Click, Screen};
+use crate::app::{App, CLUSTERS, Click};
+use crate::solana::Kind;
 use crate::solana::{Node, Status, Tx};
 
 pub const ACCENT: Color = Color::Rgb(139, 122, 255);
@@ -193,48 +194,75 @@ pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let help_height = if inner.height >= 16 { 8 } else { 0 };
+    let help_height = if inner.height >= 14 { 6 } else { 0 };
     let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(help_height)]).split(inner);
-    for (i, screen) in Screen::ALL.iter().enumerate() {
-        let y = rows[0].y + i as u16;
-        if y < rows[0].y + rows[0].height {
-            app.push_hit(Rect { x: rows[0].x, y, width: rows[0].width, height: 1 }, Click::Workspace(*screen));
-        }
+
+    if app.entries.is_empty() {
+        f.render_widget(
+            Paragraph::new("nothing cached\n\npress o and paste a\nsignature or address")
+                .style(muted())
+                .wrap(Wrap { trim: true }),
+            rows[0],
+        );
     }
-    let items: Vec<ListItem> = Screen::ALL
+
+    let items: Vec<ListItem> = app
+        .entries
         .iter()
-        .map(|s| {
-            ListItem::new(Line::from(vec![
-                Span::raw(if *s == app.screen { "▸ " } else { "  " }),
-                Span::raw(s.title()),
-            ]))
+        .map(|entry| {
+            let (tag, color) = match entry.kind {
+                Kind::Tx => ("tx:", Color::Rgb(96, 165, 250)),
+                Kind::Account => ("acc:", ACCENT),
+            };
+            Line::from(vec![
+                Span::styled(
+                    match entry.status {
+                        Some(status) => if status == crate::solana::Status::Ok { "✓ " } else { "✕ " },
+                        None => "· ",
+                    },
+                    Style::new().fg(entry.status.map_or(MUTED, status_color)),
+                ),
+                Span::styled(tag, Style::new().fg(color)),
+                Span::raw(short(&entry.key)),
+            ])
+            .into()
         })
         .collect();
-    let mut state = ListState::default().with_selected(Some(app.nav_index));
+
+    for row in 0..items.len().min(rows[0].height as usize) {
+        app.push_hit(
+            Rect { x: rows[0].x, y: rows[0].y + row as u16, width: rows[0].width, height: 1 },
+            Click::Entry(row),
+        );
+    }
+
+    let mut state = ListState::default().with_selected(Some(app.entry_index));
     f.render_stateful_widget(
-        List::new(items).highlight_style(Style::new().fg(ACCENT).bold()),
+        List::new(items).highlight_style(if app.focus_nav {
+            Style::new().bg(Color::Rgb(38, 38, 58)).bold()
+        } else {
+            Style::new().bold()
+        }),
         rows[0],
         &mut state,
     );
 
-    let keys = [
-        ("↑↓", "Navigate"),
-        ("←→", "Collapse"),
-        ("c", "Cluster"),
-        ("/", "Search"),
-        ("o", "Open"),
-        ("x", "Explorer"),
-        ("?", "Help"),
-    ];
     if help_height == 0 {
         return;
     }
+    let keys = [
+        ("Enter", "open"),
+        ("Tab", "screen"),
+        ("c", "cluster"),
+        ("o", "load"),
+        ("?", "help"),
+    ];
     f.render_widget(
         Paragraph::new(
             keys.iter()
                 .map(|(k, v)| {
                     Line::from(vec![
-                        Span::styled(format!("{k:>4} "), Style::new().fg(ACCENT)),
+                        Span::styled(format!("{k:>5} "), Style::new().fg(ACCENT)),
                         Span::styled(*v, muted()),
                     ])
                 })
@@ -242,6 +270,29 @@ pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
         ),
         rows[1],
     );
+}
+
+pub fn render_tabs(f: &mut Frame, area: Rect, app: &mut App) {
+    let mut spans = Vec::new();
+    let mut x = area.x;
+    for (i, screen) in app.screens().iter().enumerate() {
+        let active = *screen == app.screen;
+        let label = format!(" {} {} ", i + 1, screen.title());
+        let width = label.chars().count() as u16;
+        spans.push(Span::styled(
+            label,
+            if active {
+                Style::new().fg(ACCENT).bg(Color::Rgb(38, 38, 58)).bold()
+            } else {
+                muted()
+            },
+        ));
+        app.push_hit(Rect { x, y: area.y, width, height: 1 }, Click::Workspace(*screen));
+        x += width;
+        spans.push(Span::styled("│", Style::new().fg(PANEL)));
+        x += 1;
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 pub fn render_compute_chart(f: &mut Frame, area: Rect, tx: &Tx, selected: usize, focused: bool) {

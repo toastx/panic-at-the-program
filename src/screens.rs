@@ -12,8 +12,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let wide = rows[1].width >= 108;
     let detail = wide && matches!(app.screen, Screen::Overview | Screen::Execution) && app.tx.is_some();
+    let _ = wide;
     let columns = Layout::horizontal([
-        Constraint::Length(if rows[1].width >= 90 { 18 } else { 0 }),
+        Constraint::Length(if rows[1].width >= 90 { 22 } else { 0 }),
         Constraint::Min(30),
         Constraint::Length(if detail { 38 } else { 0 }),
     ])
@@ -23,19 +24,32 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         render_nav(f, columns[0], app);
     }
 
+    let tabs_area = Rect {
+        x: columns[1].x,
+        y: columns[1].y,
+        width: columns[1].width + columns[2].width,
+        height: 1,
+    };
+    render_tabs(f, tabs_area, app);
+    let body = Rect { y: columns[1].y + 1, height: columns[1].height - 1, ..columns[1] };
+
     match app.screen {
-        Screen::History => history(f, columns[1], app),
-        Screen::Overview => overview(f, columns[1], app),
-        Screen::Execution => execution(f, columns[1], app),
-        Screen::Accounts => accounts(f, columns[1], app),
-        Screen::StateDiff => state_diff(f, columns[1], app),
-        Screen::Logs => logs(f, columns[1], app),
-        Screen::Raw => raw(f, columns[1], app),
-        Screen::Account => account_info(f, columns[1], app),
+        Screen::Overview => overview(f, body, app),
+        Screen::Execution => execution(f, body, app),
+        Screen::Accounts => accounts(f, body, app),
+        Screen::StateDiff => state_diff(f, body, app),
+        Screen::Logs => logs(f, body, app),
+        Screen::Raw => raw(f, body, app),
+        Screen::Info => account_info(f, body, app),
+        Screen::Data => account_data(f, body, app),
     }
 
     if detail {
-        detail_panel(f, columns[2], app);
+        detail_panel(
+            f,
+            Rect { y: columns[2].y + 1, height: columns[2].height - 1, ..columns[2] },
+            app,
+        );
     }
     footer(f, rows[2], app);
 
@@ -77,7 +91,9 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("Enter", Style::new().fg(ACCENT)),
             Span::styled(" inspect  ", muted()),
             Span::styled("Tab", Style::new().fg(ACCENT)),
-            Span::styled(" panel  ", muted()),
+            Span::styled(" screen  ", muted()),
+            Span::styled("w", Style::new().fg(ACCENT)),
+            Span::styled(" sidebar  ", muted()),
             Span::styled("/", Style::new().fg(ACCENT)),
             Span::styled(" search  ", muted()),
             Span::styled("o", Style::new().fg(ACCENT)),
@@ -87,47 +103,6 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         ]),
     };
     f.render_widget(Paragraph::new(line), area);
-}
-
-fn history(f: &mut Frame, area: Rect, app: &mut App) {
-    let block = panel("HISTORY — CACHED TRANSACTIONS", !app.focus_nav);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    if app.history.is_empty() {
-        f.render_widget(
-            wrapped("no cached transactions yet — press o and paste a signature", muted()),
-            inner,
-        );
-        return;
-    }
-
-    let rows = app.history_rows();
-    let items: Vec<ListItem> = rows
-        .iter()
-        .filter_map(|&i| app.history.get(i))
-        .map(|s| {
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    match s.status {
-                        Status::Ok => "✓ ",
-                        Status::Failed => "✕ ",
-                    },
-                    Style::new().fg(status_color(s.status)),
-                ),
-                Span::raw(format!("{:<16}", short(&s.signature))),
-                Span::styled(format!("{:>3} ix", s.instructions), muted()),
-                Span::raw(format!("{:>10} CU", thousands(s.cu as u64))),
-            ]))
-        })
-        .collect();
-
-    clickable_rows(app, inner, items.len());
-    f.render_stateful_widget(
-        List::new(items).highlight_style(Style::new().bg(Color::Rgb(38, 38, 58)).bold()),
-        inner,
-        &mut app.list,
-    );
 }
 
 fn require_tx<'a>(f: &mut Frame, area: Rect, app: &'a App, title: &str) -> Option<(&'a Tx, Rect)> {
@@ -361,7 +336,19 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
 
     if !node.data.is_empty() {
         lines.push(Line::raw(""));
-        lines.push(Line::styled("DATA", muted()));
+        match crate::solana::decode_instruction(&node.program, &node.data) {
+            Some((_, fields)) => {
+                lines.push(Line::styled("DATA — parsed", muted()));
+                lines.extend(fields.into_iter().map(|(key, value)| {
+                    Line::from(vec![
+                        Span::styled(format!("{key:<13}"), Style::new().fg(Color::Rgb(96, 165, 250))),
+                        Span::raw(value),
+                    ])
+                }));
+            }
+            None => lines.push(Line::styled("DATA — no decoder", muted())),
+        }
+        lines.push(Line::styled("raw (base58)", muted()));
         lines.push(Line::raw(node.data.clone()));
     }
 
@@ -464,8 +451,18 @@ fn logs(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn raw(f: &mut Frame, area: Rect, app: &mut App) {
-    let Some((tx, inner)) = require_tx(f, area, app, "RAW DATA") else { return };
-    let text = crate::solana::load(&app.cluster, &tx.signature)
+    let block = panel("RAW RPC RESPONSE", !app.focus_nav);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let cache_key = match app.kind {
+        crate::solana::Kind::Tx => app.tx().map(|tx| tx.signature.clone()),
+        crate::solana::Kind::Account => app.account.as_ref().map(|a| format!("account-{}", a.key)),
+    };
+    let Some(cache_key) = cache_key else {
+        f.render_widget(wrapped("nothing loaded — press o", muted()), inner);
+        return;
+    };
+    let text = crate::solana::load(&app.cluster, &cache_key)
         .and_then(|v| serde_json::to_string_pretty(&v).ok())
         .unwrap_or_else(|| "cache entry unavailable".to_string());
     f.render_widget(
@@ -483,25 +480,36 @@ fn clickable_rows(app: &mut App, area: Rect, count: usize) {
     }
 }
 
-fn account_info(f: &mut Frame, area: Rect, app: &mut App) {
-    let block = panel("ACCOUNT INFO", !app.focus_nav);
+fn require_account<'a>(f: &mut Frame, area: Rect, app: &'a App, title: &str) -> Option<(&'a crate::solana::AccountInfo, Rect)> {
+    let block = panel(title, !app.focus_nav);
     let inner = block.inner(area);
     f.render_widget(block, area);
+    match &app.account {
+        Some(account) => Some((account, inner)),
+        None => {
+            f.render_widget(
+                wrapped("no account loaded — press o and paste an address", muted()),
+                inner,
+            );
+            None
+        }
+    }
+}
 
-    let Some(account) = &app.account else {
-        f.render_widget(
-            wrapped("no account loaded — press o and paste an address, or click one in Accounts", muted()),
-            inner,
-        );
-        return;
-    };
+fn account_info(f: &mut Frame, area: Rect, app: &mut App) {
+    let Some((account, inner)) = require_account(f, area, app, "ACCOUNT INFO") else { return };
+    let decoded = crate::solana::decode_account(account);
 
-    let rows = Layout::vertical([Constraint::Length(7), Constraint::Min(3)]).split(inner);
-    let header = vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled(account.key.clone(), Style::new().fg(Color::White).bold()),
             Span::raw("  "),
             chip(if account.executable { "program" } else { "account" }, ACCENT),
+            Span::raw("  "),
+            chip(
+                decoded.as_ref().map_or("unknown layout", |(name, _)| name),
+                Color::Rgb(96, 165, 250),
+            ),
         ]),
         Line::raw(""),
         Line::from(vec![
@@ -524,39 +532,63 @@ fn account_info(f: &mut Frame, area: Rect, app: &mut App) {
                 account.rent_epoch.to_string()
             }),
         ]),
+        Line::raw(""),
     ];
-    f.render_widget(Paragraph::new(header), rows[0]);
 
-    let dump = panel("DATA (hex)", false);
-    let dump_inner = dump.inner(rows[1]);
-    f.render_widget(dump, rows[1]);
+    match decoded {
+        Some((name, fields)) => {
+            lines.push(Line::styled(format!("PARSED — {name}"), muted()));
+            lines.extend(fields.into_iter().map(|(key, value)| {
+                Line::from(vec![
+                    Span::styled(format!("{key:<18}"), Style::new().fg(Color::Rgb(96, 165, 250))),
+                    Span::raw(value),
+                ])
+            }));
+        }
+        None => lines.push(Line::styled(
+            "PARSED — no decoder for this owner, see the Data tab for raw bytes",
+            muted(),
+        )),
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn account_data(f: &mut Frame, area: Rect, app: &mut App) {
+    let scroll = app.scroll;
+    let Some((account, inner)) = require_account(f, area, app, "ACCOUNT DATA") else { return };
     if account.data.is_empty() {
-        f.render_widget(wrapped("account holds no data", muted()), dump_inner);
+        f.render_widget(wrapped("account holds no data", muted()), inner);
         return;
     }
+    let decoded = crate::solana::decode_account(account);
+    let parsed_height = decoded.as_ref().map_or(3, |(_, fields)| fields.len() as u16 + 3);
+    let rows = Layout::vertical([Constraint::Length(parsed_height), Constraint::Min(3)]).split(inner);
 
-    let lines: Vec<Line> = account
-        .data
-        .chunks(16)
-        .skip(app.scroll)
-        .take(dump_inner.height as usize)
-        .enumerate()
-        .map(|(row, chunk)| {
-            let offset = (app.scroll + row) * 16;
-            let hex = chunk
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<Vec<_>>()
-                .chunks(8)
-                .map(|half| half.join(" "))
-                .collect::<Vec<_>>()
-                .join("  ");
-            let ascii: String = chunk
-                .iter()
-                .map(|b| if b.is_ascii_graphic() { *b as char } else { '·' })
-                .collect();
+    let mut parsed = vec![Line::styled(
+        match &decoded {
+            Some((name, _)) => format!("PARSED — {name}"),
+            None => format!("PARSED — no decoder for owner {}", short(&account.owner)),
+        },
+        muted(),
+    )];
+    if let Some((_, fields)) = &decoded {
+        parsed.extend(fields.iter().map(|(key, value)| {
             Line::from(vec![
-                Span::styled(format!("{offset:08x}  "), muted()),
+                Span::styled(format!("{key:<18}"), Style::new().fg(Color::Rgb(96, 165, 250))),
+                Span::raw(value.clone()),
+            ])
+        }));
+    }
+    f.render_widget(Paragraph::new(parsed), rows[0]);
+
+    let dump = panel("RAW (hex)", false);
+    let dump_inner = dump.inner(rows[1]);
+    f.render_widget(dump, rows[1]);
+    let lines: Vec<Line> = crate::solana::hex_dump(&account.data, scroll, dump_inner.height as usize)
+        .into_iter()
+        .map(|(offset, hex, ascii)| {
+            Line::from(vec![
+                Span::styled(format!("{offset}  "), muted()),
                 Span::styled(format!("{hex:<50}"), Style::new().fg(Color::Rgb(96, 165, 250))),
                 Span::styled(format!(" │{ascii}"), muted()),
             ])
@@ -582,9 +614,10 @@ fn help(f: &mut Frame, area: Rect) {
     let keys = [
         ("↑ ↓ / j k", "move selection"),
         ("→ / ←", "expand / collapse CPI node"),
-        ("Enter", "open transaction (history)"),
-        ("Tab", "switch between nav and content"),
-        ("1-7", "jump to workspace"),
+        ("Enter", "open entry (sidebar) / toggle node"),
+        ("Tab", "next screen for this entity"),
+        ("w", "focus the sidebar entity list"),
+        ("1-6", "jump to screen"),
         ("/", "search current view"),
         ("o", "open a transaction signature"),
         ("r", "refetch, bypassing cache"),
