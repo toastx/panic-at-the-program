@@ -1,5 +1,5 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{App, CLUSTERS, Click, Screen};
 use crate::solana::{Node, Status, Tx};
@@ -94,22 +94,12 @@ pub fn tree_prefixes(nodes: &[Node]) -> Vec<String> {
 pub fn render_topbar(f: &mut Frame, area: Rect, app: &mut App) {
     let mut spans = vec![Span::styled(" SOLWORK ", Style::new().fg(ACCENT).bold()), Span::styled("│", muted())];
 
-    let mut x = area.x + spans.iter().map(|s| s.width() as u16).sum::<u16>();
-    for cluster in CLUSTERS {
-        let active = app.cluster == cluster;
-        let label = format!(" {}{} ", if active { "●" } else { "○" }, cluster);
-        let width = label.chars().count() as u16;
-        spans.push(Span::styled(
-            label,
-            if active {
-                Style::new().fg(OK).bg(Color::Rgb(32, 33, 48)).bold()
-            } else {
-                muted()
-            },
-        ));
-        app.push_hit(Rect { x, y: area.y, width, height: 1 }, Click::Cluster(cluster));
-        x += width;
-    }
+    let x = area.x + spans.iter().map(|s| s.width() as u16).sum::<u16>();
+    let label = format!(" ● {} {} ", app.cluster, if app.cluster_menu { "▴" } else { "▾" });
+    let width = label.chars().count() as u16;
+    spans.push(Span::styled(label, Style::new().fg(OK).bg(Color::Rgb(32, 33, 48)).bold()));
+    app.cluster_button = Rect { x, y: area.y, width, height: 1 };
+    app.push_hit(app.cluster_button, Click::ClusterMenu);
     spans.push(Span::styled("│", muted()));
     if let Some(tx) = &app.tx {
         let pct = tx.cu as f64 / tx.cu_limit.max(1) as f64;
@@ -153,6 +143,49 @@ pub fn render_topbar(f: &mut Frame, area: Rect, app: &mut App) {
         Paragraph::new(Line::from(spans)),
         Rect { width: area.width.saturating_sub(width + 1), ..area },
     );
+}
+
+pub fn render_cluster_menu(f: &mut Frame, app: &mut App) {
+    let anchor = app.cluster_button;
+    let width = 16.min(f.area().width);
+    let area = Rect {
+        x: anchor.x.min(f.area().width.saturating_sub(width)),
+        y: anchor.y + 1,
+        width,
+        height: (CLUSTERS.len() as u16 + 2).min(f.area().height.saturating_sub(anchor.y + 1)),
+    };
+    f.render_widget(Clear, area);
+    let block = panel("NETWORK", true);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let lines: Vec<Line> = CLUSTERS
+        .iter()
+        .enumerate()
+        .map(|(i, cluster)| {
+            let selected = i == app.cluster_index;
+            let active = app.cluster == *cluster;
+            Line::from(vec![
+                Span::styled(if active { " ● " } else { "   " }, Style::new().fg(OK)),
+                Span::styled(
+                    format!("{cluster:<11}"),
+                    if selected {
+                        Style::new().fg(ACCENT).bg(Color::Rgb(38, 38, 58)).bold()
+                    } else {
+                        Style::new()
+                    },
+                ),
+            ])
+        })
+        .collect();
+
+    for (i, cluster) in CLUSTERS.iter().enumerate() {
+        let y = inner.y + i as u16;
+        if y < inner.y + inner.height {
+            app.push_hit(Rect { x: inner.x, y, width: inner.width, height: 1 }, Click::Cluster(cluster));
+        }
+    }
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {

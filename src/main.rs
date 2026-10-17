@@ -119,6 +119,24 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
         Mode::Normal => {}
     }
 
+    if app.cluster_menu {
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.cluster_index = (app.cluster_index + 1) % CLUSTERS.len();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.cluster_index = (app.cluster_index + CLUSTERS.len() - 1) % CLUSTERS.len();
+            }
+            KeyCode::Enter => {
+                let cluster = CLUSTERS[app.cluster_index];
+                app.set_cluster(cluster);
+            }
+            KeyCode::Char('q') => app.quit = true,
+            _ => app.cluster_menu = false,
+        }
+        return;
+    }
+
     match key.code {
         KeyCode::Char('q') => app.quit = true,
         KeyCode::Char('?') => app.mode = Mode::Help,
@@ -135,13 +153,7 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Tab => app.focus_nav = !app.focus_nav,
         KeyCode::Char('x') => app.open_in_explorer(),
-        KeyCode::Char('c') => {
-            let next = CLUSTERS
-                .iter()
-                .position(|c| *c == app.cluster)
-                .map_or(0, |i| (i + 1) % CLUSTERS.len());
-            app.set_cluster(CLUSTERS[next]);
-        }
+        KeyCode::Char('c') => app.toggle_cluster_menu(),
         KeyCode::Char(c @ '1'..='8') => {
             let index = c as usize - '1' as usize;
             app.goto(Screen::ALL[index]);
@@ -376,18 +388,48 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_cluster_chip_switches_network() {
+    fn cluster_dropdown_opens_on_click_and_switches_network() {
         let mut app = loaded();
-        render(&mut app, 120, 34);
-        let chip = app
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("● devnet ▾"));
+        assert!(!screen.contains("NETWORK"));
+
+        let button = app
+            .hits
+            .iter()
+            .find(|hit| hit.click == Click::ClusterMenu)
+            .map(|hit| (hit.area.x, hit.area.y))
+            .expect("cluster button is clickable");
+        app.click(button.0, button.1);
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("NETWORK"));
+        assert!(screen.contains("testnet"));
+
+        let item = app
             .hits
             .iter()
             .find(|hit| hit.click == Click::Cluster("testnet"))
             .map(|hit| (hit.area.x, hit.area.y))
-            .expect("cluster chip is clickable");
-        app.click(chip.0, chip.1);
+            .expect("dropdown item is clickable");
+        app.click(item.0, item.1);
         assert_eq!(app.cluster, "testnet");
-        assert!(render(&mut app, 120, 34).contains("●testnet"));
+        assert!(!app.cluster_menu);
+        assert!(render(&mut app, 120, 34).contains("● testnet ▾"));
+    }
+
+    #[test]
+    fn cluster_dropdown_is_keyboard_driven() {
+        let mut app = loaded();
+        on_key(&mut app, KeyEvent::from(KeyCode::Char('c')));
+        assert!(app.cluster_menu);
+        on_key(&mut app, KeyEvent::from(KeyCode::Down));
+        on_key(&mut app, KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.cluster, "testnet");
+
+        on_key(&mut app, KeyEvent::from(KeyCode::Char('c')));
+        on_key(&mut app, KeyEvent::from(KeyCode::Esc));
+        assert!(!app.cluster_menu);
+        assert_eq!(app.cluster, "testnet");
     }
 
     #[test]

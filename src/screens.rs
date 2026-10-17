@@ -39,6 +39,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     footer(f, rows[2], app);
 
+    if app.cluster_menu {
+        render_cluster_menu(f, app);
+    }
     if matches!(app.mode, Mode::Help) {
         help(f, f.area());
     }

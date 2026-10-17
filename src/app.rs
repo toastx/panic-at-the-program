@@ -10,6 +10,7 @@ pub const CLUSTERS: [&str; 4] = ["mainnet", "devnet", "testnet", "localnet"];
 #[derive(Clone, PartialEq)]
 pub enum Click {
     Workspace(Screen),
+    ClusterMenu,
     Cluster(&'static str),
     Explorer,
     Row(usize),
@@ -81,6 +82,9 @@ pub struct App {
     pub scroll: usize,
     pub quit: bool,
     pub account: Option<AccountInfo>,
+    pub cluster_button: Rect,
+    pub cluster_menu: bool,
+    pub cluster_index: usize,
     pub hits: Vec<Hit>,
 }
 
@@ -101,6 +105,9 @@ impl App {
             scroll: 0,
             quit: false,
             account: None,
+            cluster_button: Rect::new(0, 0, 0, 0),
+            cluster_menu: false,
+            cluster_index: 0,
             hits: Vec::new(),
         }
     }
@@ -141,7 +148,13 @@ impl App {
         self.history = solana::summaries(&self.cluster);
     }
 
+    pub fn toggle_cluster_menu(&mut self) {
+        self.cluster_menu = !self.cluster_menu;
+        self.cluster_index = CLUSTERS.iter().position(|c| *c == self.cluster).unwrap_or(0);
+    }
+
     pub fn set_cluster(&mut self, cluster: &str) {
+        self.cluster_menu = false;
         if self.cluster == cluster {
             return;
         }
@@ -195,6 +208,7 @@ impl App {
                 self.goto(screen);
                 self.focus_nav = false;
             }
+            Some(Click::ClusterMenu) => self.toggle_cluster_menu(),
             Some(Click::Cluster(cluster)) => self.set_cluster(cluster),
             Some(Click::Explorer) => self.open_in_explorer(),
             Some(Click::Row(index)) => {
@@ -212,7 +226,7 @@ impl App {
                 }
             }
             Some(Click::Inspect(key)) => self.open_account(&key),
-            None => {}
+            None => self.cluster_menu = false,
         }
     }
 
