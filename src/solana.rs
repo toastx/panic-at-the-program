@@ -58,36 +58,27 @@ pub struct Tx {
     pub logs: Vec<String>,
 }
 
-pub fn cluster_url(name: &str) -> String {
-    match name {
-        "devnet" | "mainnet" | "testnet" => format!("https://api.{name}-beta.solana.com")
-            .replace("api.devnet-beta", "api.devnet")
-            .replace("api.testnet-beta", "api.testnet"),
-        url => url.to_string(),
-    }
-}
-
 fn cache_dir() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/solwork")
 }
 
-fn cache_path(signature: &str) -> PathBuf {
-    cache_dir().join(format!("{signature}.json.zst"))
+fn cache_path(cluster: &str, key: &str) -> PathBuf {
+    cache_dir().join(cluster).join(format!("{key}.json.zst"))
 }
 
-pub fn cached() -> Vec<String> {
-    let mut entries: Vec<(std::time::SystemTime, String)> = fs::read_dir(cache_dir())
+pub fn cached(cluster: &str) -> Vec<String> {
+    let mut entries: Vec<(std::time::SystemTime, String)> = fs::read_dir(cache_dir().join(cluster))
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().into_string().ok()?;
-            let sig = name.strip_suffix(".json.zst")?.to_string();
-            Some((e.metadata().ok()?.modified().ok()?, sig))
+            let key = name.strip_suffix(".json.zst")?.to_string();
+            Some((e.metadata().ok()?.modified().ok()?, key))
         })
         .collect();
     entries.sort_by(|a, b| b.0.cmp(&a.0));
-    entries.into_iter().map(|(_, sig)| sig).collect()
+    entries.into_iter().map(|(_, key)| key).collect()
 }
 
 pub struct Summary {
@@ -97,12 +88,13 @@ pub struct Summary {
     pub instructions: usize,
 }
 
-pub fn summaries() -> Vec<Summary> {
-    cached()
+pub fn summaries(cluster: &str) -> Vec<Summary> {
+    cached(cluster)
         .into_iter()
-        .map(|signature| match load(&signature) {
+        .filter(|key| !key.starts_with("account-"))
+        .map(|signature| match load(cluster, &signature) {
             Some(value) => {
-                let tx = parse(&signature, "", &value);
+                let tx = parse(&signature, cluster, &value);
                 Summary {
                     signature,
                     status: tx.status,
@@ -115,42 +107,78 @@ pub fn summaries() -> Vec<Summary> {
         .collect()
 }
 
-pub fn load(signature: &str) -> Option<Value> {
-    let bytes = fs::read(cache_path(signature)).ok()?;
+pub fn load(cluster: &str, key: &str) -> Option<Value> {
+    let bytes = fs::read(cache_path(cluster, key)).ok()?;
     serde_json::from_slice(&zstd::decode_all(&bytes[..]).ok()?).ok()
 }
 
-fn store(signature: &str, value: &Value) -> io::Result<()> {
-    fs::create_dir_all(cache_dir())?;
+fn store(cluster: &str, key: &str, value: &Value) -> io::Result<()> {
+    let path = cache_path(cluster, key);
+    fs::create_dir_all(path.parent().unwrap_or(&cache_dir()))?;
     let raw = serde_json::to_vec(value)?;
-    fs::write(cache_path(signature), zstd::encode_all(&raw[..], 19)?)
+    fs::write(path, zstd::encode_all(&raw[..], 19)?)
 }
 
 pub fn refetch(cluster: &str, signature: &str) -> Result<Value, Box<dyn Error>> {
-    let _ = fs::remove_file(cache_path(signature));
+    let _ = fs::remove_file(cache_path(cluster, signature));
     fetch(cluster, signature)
 }
 
-pub fn fetch(cluster: &str, signature: &str) -> Result<Value, Box<dyn Error>> {
-    if let Some(value) = load(signature) {
-        return Ok(value);
-    }
-    let body = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getTransaction",
-        "params": [signature, {"encoding": "json", "maxSupportedTransactionVersion": 1}],
-    });
+fn rpc(cluster: &str, method: &str, params: Value) -> Result<Value, Box<dyn Error>> {
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
     let mut resp = ureq::post(cluster_url(cluster)).send_json(body)?;
     let value: Value = resp.body_mut().read_json()?;
     if let Some(err) = value.get("error") {
-        return Err(format!("rpc error: {err}").into());
+        let message = err["message"].as_str().unwrap_or("unknown").to_string();
+        return Err(message.into());
     }
+    Ok(value)
+}
+
+pub fn fetch(cluster: &str, signature: &str) -> Result<Value, Box<dyn Error>> {
+    if let Some(value) = load(cluster, signature) {
+        return Ok(value);
+    }
+    let value = rpc(
+        cluster,
+        "getTransaction",
+        json!([signature, {"encoding": "json", "maxSupportedTransactionVersion": 1}]),
+    )?;
     if value.get("result").is_none_or(Value::is_null) {
         return Err(format!("transaction not found on {cluster}").into());
     }
-    store(signature, &value)?;
+    store(cluster, signature, &value)?;
     Ok(value)
+}
+
+pub fn cluster_url(name: &str) -> String {
+    match name {
+        "mainnet" => "https://api.mainnet-beta.solana.com".to_string(),
+        "devnet" => "https://api.devnet.solana.com".to_string(),
+        "testnet" => "https://api.testnet.solana.com".to_string(),
+        "localnet" => "http://127.0.0.1:8899".to_string(),
+        url => url.to_string(),
+    }
+}
+
+pub fn explorer_url(cluster: &str, kind: &str, key: &str) -> String {
+    let suffix = match cluster {
+        "mainnet" => String::new(),
+        "devnet" | "testnet" => format!("?cluster={cluster}"),
+        "localnet" => "?cluster=custom&customUrl=http%3A%2F%2F127.0.0.1%3A8899".to_string(),
+        url => format!("?cluster=custom&customUrl={}", urlencode(url)),
+    };
+    format!("https://explorer.solana.com/{kind}/{key}{suffix}")
+}
+
+fn urlencode(input: &str) -> String {
+    input
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+            other => format!("%{:02X}", other as u32),
+        })
+        .collect()
 }
 
 fn program_name(id: &str) -> String {
@@ -437,4 +465,71 @@ pub fn parse(signature: &str, cluster: &str, value: &Value) -> Tx {
         logs,
         nodes,
     }
+}
+
+pub struct AccountInfo {
+    pub key: String,
+    pub lamports: u64,
+    pub owner: String,
+    pub executable: bool,
+    pub rent_epoch: u64,
+    pub data: Vec<u8>,
+}
+
+impl AccountInfo {
+    pub fn owner_name(&self) -> String {
+        program_name(&self.owner)
+    }
+}
+
+pub fn fetch_account(cluster: &str, pubkey: &str) -> Result<Value, Box<dyn Error>> {
+    let key = format!("account-{pubkey}");
+    if let Some(value) = load(cluster, &key) {
+        return Ok(value);
+    }
+    let value = rpc(cluster, "getAccountInfo", json!([pubkey, {"encoding": "base64"}]))?;
+    if value.pointer("/result/value").is_none_or(Value::is_null) {
+        return Err(format!("account not found on {cluster}").into());
+    }
+    store(cluster, &key, &value)?;
+    Ok(value)
+}
+
+pub fn refetch_account(cluster: &str, pubkey: &str) -> Result<Value, Box<dyn Error>> {
+    let _ = fs::remove_file(cache_path(cluster, &format!("account-{pubkey}")));
+    fetch_account(cluster, pubkey)
+}
+
+pub fn parse_account(pubkey: &str, value: &Value) -> AccountInfo {
+    let account = &value["result"]["value"];
+    let data = account["data"][0].as_str().map(base64_decode).unwrap_or_default();
+    AccountInfo {
+        key: pubkey.to_string(),
+        lamports: account["lamports"].as_u64().unwrap_or(0),
+        owner: account["owner"].as_str().unwrap_or_default().to_string(),
+        executable: account["executable"].as_bool().unwrap_or(false),
+        rent_epoch: account["rentEpoch"].as_u64().unwrap_or(0),
+        data,
+    }
+}
+
+fn base64_decode(input: &str) -> Vec<u8> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buffer = 0u32;
+    let mut bits = 0u32;
+    for byte in input.bytes().filter(|b| *b != b'=') {
+        let Some(value) = TABLE.iter().position(|t| *t == byte) else { continue };
+        buffer = (buffer << 6) | value as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    out
+}
+
+pub fn is_signature(input: &str) -> bool {
+    input.len() >= 80
 }

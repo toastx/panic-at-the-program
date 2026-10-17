@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::{App, Screen};
+use crate::app::{App, CLUSTERS, Click, Screen};
 use crate::solana::{Node, Status, Tx};
 
 pub const ACCENT: Color = Color::Rgb(139, 122, 255);
@@ -91,17 +91,30 @@ pub fn tree_prefixes(nodes: &[Node]) -> Vec<String> {
     out
 }
 
-pub fn render_topbar(f: &mut Frame, area: Rect, app: &App) {
-    let mut spans = vec![
-        Span::styled(" SOLWORK ", Style::new().fg(ACCENT).bold()),
-        Span::styled("│ ", muted()),
-        Span::styled(format!("● {} ", app.cluster), Style::new().fg(OK)),
-    ];
+pub fn render_topbar(f: &mut Frame, area: Rect, app: &mut App) {
+    let mut spans = vec![Span::styled(" SOLWORK ", Style::new().fg(ACCENT).bold()), Span::styled("│", muted())];
+
+    let mut x = area.x + spans.iter().map(|s| s.width() as u16).sum::<u16>();
+    for cluster in CLUSTERS {
+        let active = app.cluster == cluster;
+        let label = format!(" {}{} ", if active { "●" } else { "○" }, cluster);
+        let width = label.chars().count() as u16;
+        spans.push(Span::styled(
+            label,
+            if active {
+                Style::new().fg(OK).bg(Color::Rgb(32, 33, 48)).bold()
+            } else {
+                muted()
+            },
+        ));
+        app.push_hit(Rect { x, y: area.y, width, height: 1 }, Click::Cluster(cluster));
+        x += width;
+    }
+    spans.push(Span::styled("│", muted()));
     if let Some(tx) = &app.tx {
         let pct = tx.cu as f64 / tx.cu_limit.max(1) as f64;
         spans.extend([
-            Span::styled("│ ", muted()),
-            Span::raw(format!("{} ", short(&tx.signature))),
+            Span::raw(format!(" {} ", short(&tx.signature))),
             chip(
                 match tx.status {
                     Status::Ok => "✓ Success",
@@ -123,9 +136,23 @@ pub fn render_topbar(f: &mut Frame, area: Rect, app: &App) {
         ]);
         spans.extend(bar((pct * 10.0) as usize, 10, ACCENT));
     } else {
-        spans.push(Span::styled("│ no transaction loaded — press o", muted()));
+        spans.push(Span::styled(" nothing loaded — press o or click a cached row", muted()));
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    let button = " ↗ Explorer ";
+    let width = button.chars().count() as u16;
+    if area.width > width + 4 {
+        let button_area = Rect { x: area.x + area.width - width, y: area.y, width, height: 1 };
+        f.render_widget(
+            Paragraph::new(Span::styled(button, Style::new().fg(ACCENT).bg(Color::Rgb(32, 33, 48)).bold())),
+            button_area,
+        );
+        app.push_hit(button_area, Click::Explorer);
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect { width: area.width.saturating_sub(width + 1), ..area },
+    );
 }
 
 pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
@@ -135,6 +162,12 @@ pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
 
     let help_height = if inner.height >= 16 { 8 } else { 0 };
     let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(help_height)]).split(inner);
+    for (i, screen) in Screen::ALL.iter().enumerate() {
+        let y = rows[0].y + i as u16;
+        if y < rows[0].y + rows[0].height {
+            app.push_hit(Rect { x: rows[0].x, y, width: rows[0].width, height: 1 }, Click::Workspace(*screen));
+        }
+    }
     let items: Vec<ListItem> = Screen::ALL
         .iter()
         .map(|s| {
@@ -154,9 +187,10 @@ pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
     let keys = [
         ("↑↓", "Navigate"),
         ("←→", "Collapse"),
-        ("Tab", "Panel"),
+        ("c", "Cluster"),
         ("/", "Search"),
-        ("o", "Open tx"),
+        ("o", "Open"),
+        ("x", "Explorer"),
         ("?", "Help"),
     ];
     if help_height == 0 {

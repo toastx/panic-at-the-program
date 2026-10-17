@@ -5,12 +5,15 @@ mod ui;
 
 use std::io;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, MouseButton,
+    MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::prelude::*;
 
-use app::{App, Mode, Screen};
+use app::{App, CLUSTERS, Click, Mode, Screen};
 
 fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -24,20 +27,25 @@ fn main() -> io::Result<()> {
 
     enable_raw_mode()?;
     let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen)?;
+    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
     let mut term = Terminal::new(CrosstermBackend::new(out))?;
 
     while !app.quit {
         term.draw(|f| screens::draw(f, &mut app))?;
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                on_key(&mut app, key);
-            }
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => on_key(&mut app, key),
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => app.click(mouse.column, mouse.row),
+                MouseEventKind::ScrollDown => move_selection(&mut app, 1),
+                MouseEventKind::ScrollUp => move_selection(&mut app, -1),
+                _ => {}
+            },
+            _ => {}
         }
     }
 
     disable_raw_mode()?;
-    execute!(term.backend_mut(), LeaveAlternateScreen)?;
+    execute!(term.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     term.show_cursor()
 }
 
@@ -126,7 +134,15 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
             app.message.clear();
         }
         KeyCode::Tab => app.focus_nav = !app.focus_nav,
-        KeyCode::Char(c @ '1'..='7') => {
+        KeyCode::Char('x') => app.open_in_explorer(),
+        KeyCode::Char('c') => {
+            let next = CLUSTERS
+                .iter()
+                .position(|c| *c == app.cluster)
+                .map_or(0, |i| (i + 1) % CLUSTERS.len());
+            app.set_cluster(CLUSTERS[next]);
+        }
+        KeyCode::Char(c @ '1'..='8') => {
             let index = c as usize - '1' as usize;
             app.goto(Screen::ALL[index]);
         }
@@ -183,7 +199,14 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
             }
         },
         KeyCode::Char('r') => {
-            if let Some(signature) = app.tx().map(|tx| tx.signature.clone()) {
+            if app.screen == Screen::Account {
+                if let Some(key) = app.account.as_ref().map(|a| a.key.clone()) {
+                    match solana::refetch_account(&app.cluster, &key) {
+                        Ok(value) => app.account = Some(solana::parse_account(&key, &value)),
+                        Err(err) => app.message = err.to_string(),
+                    }
+                }
+            } else if let Some(signature) = app.tx().map(|tx| tx.signature.clone()) {
                 match solana::refetch(&app.cluster, &signature) {
                     Ok(value) => app.tx = Some(solana::parse(&signature, &app.cluster, &value)),
                     Err(err) => app.message = err.to_string(),
@@ -353,6 +376,84 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_cluster_chip_switches_network() {
+        let mut app = loaded();
+        render(&mut app, 120, 34);
+        let chip = app
+            .hits
+            .iter()
+            .find(|hit| hit.click == Click::Cluster("testnet"))
+            .map(|hit| (hit.area.x, hit.area.y))
+            .expect("cluster chip is clickable");
+        app.click(chip.0, chip.1);
+        assert_eq!(app.cluster, "testnet");
+        assert!(render(&mut app, 120, 34).contains("●testnet"));
+    }
+
+    #[test]
+    fn clicking_a_workspace_switches_screen() {
+        let mut app = loaded();
+        render(&mut app, 120, 34);
+        let nav = app
+            .hits
+            .iter()
+            .find(|hit| hit.click == Click::Workspace(Screen::Logs))
+            .map(|hit| (hit.area.x, hit.area.y))
+            .expect("workspace row is clickable");
+        app.click(nav.0, nav.1);
+        assert!(render(&mut app, 120, 34).contains("PROGRAM LOGS"));
+    }
+
+    #[test]
+    fn explorer_urls_follow_the_cluster() {
+        let mut app = loaded();
+        let (kind, key) = app.explorer_target().unwrap();
+        assert_eq!(kind, "tx");
+        assert_eq!(
+            solana::explorer_url(&app.cluster, &kind, &key),
+            "https://explorer.solana.com/tx/4vK9mP?cluster=devnet"
+        );
+        app.set_cluster("mainnet");
+        assert_eq!(
+            solana::explorer_url("mainnet", "tx", &key),
+            "https://explorer.solana.com/tx/4vK9mP"
+        );
+        assert!(solana::explorer_url("localnet", "address", "abc").contains("customUrl=http%3A"));
+    }
+
+    #[test]
+    fn account_screen_renders_balance_owner_and_hex_dump() {
+        let mut app = App::new("devnet".into());
+        let value = json!({"result": {"value": {
+            "lamports": 2039280u64,
+            "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "executable": false,
+            "rentEpoch": 361u64,
+            "data": ["SGVsbG8gU29sYW5h", "base64"]
+        }}});
+        app.account = Some(solana::parse_account("8tK4iuyxABCD", &value));
+        app.goto(Screen::Account);
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("0.002039280 SOL"));
+        assert!(screen.contains("Token Program"));
+        assert!(screen.contains("12 bytes"));
+        assert!(screen.contains("48 65 6c 6c 6f"));
+        assert!(screen.contains("Hello·Solana"));
+    }
+
+    #[test]
+    fn clicking_an_account_row_targets_inspection() {
+        let mut app = loaded();
+        app.goto(Screen::Accounts);
+        render(&mut app, 120, 34);
+        let inspect = app.hits.iter().filter_map(|hit| match &hit.click {
+            Click::Inspect(key) => Some(key.clone()),
+            _ => None,
+        });
+        assert!(inspect.count() >= 3);
+    }
+
+    #[test]
     #[ignore = "network"]
     fn fetches_and_caches_from_mainnet() {
         let signature = "32A7NyijRbsu3x6DVt1aKJwhPo27PHWSqgxKe54n2xdjUS68XKMkbhnYivyEjnWZ4gU5TxjgRVQcGLmeh6oP8YhX";
@@ -360,6 +461,6 @@ mod tests {
         let tx = solana::parse(signature, "mainnet", &value);
         assert!(!tx.nodes.is_empty());
         assert!(tx.cu > 0);
-        assert!(solana::cached().contains(&signature.to_string()));
+        assert!(solana::cached("mainnet").contains(&signature.to_string()));
     }
 }

@@ -1,8 +1,25 @@
 use std::collections::HashSet;
 
+use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 
-use crate::solana::{self, Summary, Tx};
+use crate::solana::{self, AccountInfo, Summary, Tx};
+
+pub const CLUSTERS: [&str; 4] = ["mainnet", "devnet", "testnet", "localnet"];
+
+#[derive(Clone, PartialEq)]
+pub enum Click {
+    Workspace(Screen),
+    Cluster(&'static str),
+    Explorer,
+    Row(usize),
+    Inspect(String),
+}
+
+pub struct Hit {
+    pub area: Rect,
+    pub click: Click,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Screen {
@@ -13,10 +30,11 @@ pub enum Screen {
     StateDiff,
     Logs,
     Raw,
+    Account,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 7] = [
+    pub const ALL: [Screen; 8] = [
         Screen::History,
         Screen::Overview,
         Screen::Execution,
@@ -24,6 +42,7 @@ impl Screen {
         Screen::StateDiff,
         Screen::Logs,
         Screen::Raw,
+        Screen::Account,
     ];
 
     pub fn title(&self) -> &'static str {
@@ -35,6 +54,7 @@ impl Screen {
             Screen::StateDiff => "State Diff",
             Screen::Logs => "Logs",
             Screen::Raw => "Raw Data",
+            Screen::Account => "Account Info",
         }
     }
 }
@@ -60,11 +80,14 @@ pub struct App {
     pub message: String,
     pub scroll: usize,
     pub quit: bool,
+    pub account: Option<AccountInfo>,
+    pub hits: Vec<Hit>,
 }
 
 impl App {
     pub fn new(cluster: String) -> Self {
         App {
+            history: solana::summaries(&cluster),
             cluster,
             tx: None,
             screen: Screen::History,
@@ -72,26 +95,129 @@ impl App {
             focus_nav: false,
             list: ListState::default().with_selected(Some(0)),
             collapsed: HashSet::new(),
-            history: solana::summaries(),
             mode: Mode::Normal,
             search: String::new(),
             message: String::new(),
             scroll: 0,
             quit: false,
+            account: None,
+            hits: Vec::new(),
         }
     }
 
-    pub fn open(&mut self, signature: &str) {
+    pub fn open(&mut self, input: &str) {
+        if solana::is_signature(input) {
+            self.open_transaction(input);
+        } else {
+            self.open_account(input);
+        }
+    }
+
+    pub fn open_transaction(&mut self, signature: &str) {
         match solana::fetch(&self.cluster, signature) {
             Ok(value) => {
                 self.tx = Some(solana::parse(signature, &self.cluster, &value));
                 self.collapsed.clear();
-                self.history = solana::summaries();
+                self.refresh_history();
                 self.message.clear();
                 self.goto(Screen::Overview);
             }
-            Err(err) => self.message = err.to_string(),
+            Err(err) => self.message = format!("{signature}: {err}"),
         }
+    }
+
+    pub fn open_account(&mut self, pubkey: &str) {
+        match solana::fetch_account(&self.cluster, pubkey) {
+            Ok(value) => {
+                self.account = Some(solana::parse_account(pubkey, &value));
+                self.message.clear();
+                self.goto(Screen::Account);
+            }
+            Err(err) => self.message = format!("{pubkey}: {err}"),
+        }
+    }
+
+    pub fn refresh_history(&mut self) {
+        self.history = solana::summaries(&self.cluster);
+    }
+
+    pub fn set_cluster(&mut self, cluster: &str) {
+        if self.cluster == cluster {
+            return;
+        }
+        self.cluster = cluster.to_string();
+        self.message.clear();
+        self.refresh_history();
+        if let Some(signature) = self.tx().map(|tx| tx.signature.clone()) {
+            self.open_transaction(&signature);
+        }
+        if let Some(key) = self.account.as_ref().map(|a| a.key.clone()) {
+            self.open_account(&key);
+        }
+    }
+
+    pub fn explorer_target(&self) -> Option<(String, String)> {
+        match self.screen {
+            Screen::Account => self
+                .account
+                .as_ref()
+                .map(|a| ("address".to_string(), a.key.clone())),
+            _ => self.tx().map(|tx| ("tx".to_string(), tx.signature.clone())),
+        }
+    }
+
+    pub fn open_in_explorer(&mut self) {
+        let Some((kind, key)) = self.explorer_target() else {
+            self.message = "nothing loaded to open in explorer".to_string();
+            return;
+        };
+        let url = solana::explorer_url(&self.cluster, &kind, &key);
+        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        match std::process::Command::new(opener).arg(&url).spawn() {
+            Ok(_) => self.message = format!("opened {url}"),
+            Err(err) => self.message = format!("{err}: {url}"),
+        }
+    }
+
+    pub fn click(&mut self, column: u16, row: u16) {
+        let point = (column, row);
+        let hit = self
+            .hits
+            .iter()
+            .rev()
+            .find(|hit| {
+                let a = hit.area;
+                point.0 >= a.x && point.0 < a.x + a.width && point.1 >= a.y && point.1 < a.y + a.height
+            })
+            .map(|hit| hit.click.clone());
+        match hit {
+            Some(Click::Workspace(screen)) => {
+                self.goto(screen);
+                self.focus_nav = false;
+            }
+            Some(Click::Cluster(cluster)) => self.set_cluster(cluster),
+            Some(Click::Explorer) => self.open_in_explorer(),
+            Some(Click::Row(index)) => {
+                self.focus_nav = false;
+                self.list.select(Some(index));
+                if self.screen == Screen::History {
+                    if let Some(signature) = self
+                        .history_rows()
+                        .get(index)
+                        .and_then(|&i| self.history.get(i))
+                        .map(|s| s.signature.clone())
+                    {
+                        self.open_transaction(&signature);
+                    }
+                }
+            }
+            Some(Click::Inspect(key)) => self.open_account(&key),
+            None => {}
+        }
+    }
+
+    pub fn push_hit(&mut self, area: Rect, click: Click) {
+        self.hits.push(Hit { area, click });
     }
 
     pub fn goto(&mut self, screen: Screen) {
@@ -186,7 +312,7 @@ impl App {
             Screen::Accounts => self.account_rows().len(),
             Screen::StateDiff => self.balance_rows().len(),
             Screen::Logs => self.log_rows().len(),
-            Screen::Raw => 0,
+            Screen::Raw | Screen::Account => 0,
         }
     }
 

@@ -1,11 +1,12 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Clear, List, ListItem, Paragraph, Wrap};
 
-use crate::app::{App, Mode, Screen};
+use crate::app::{App, Click, Mode, Screen};
 use crate::solana::{Status, Tx};
 use crate::ui::*;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    app.hits.clear();
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(5), Constraint::Length(1)]).split(f.area());
     render_topbar(f, rows[0], app);
 
@@ -30,6 +31,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Screen::StateDiff => state_diff(f, columns[1], app),
         Screen::Logs => logs(f, columns[1], app),
         Screen::Raw => raw(f, columns[1], app),
+        Screen::Account => account_info(f, columns[1], app),
     }
 
     if detail {
@@ -117,6 +119,7 @@ fn history(f: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
 
+    clickable_rows(app, inner, items.len());
     f.render_stateful_widget(
         List::new(items).highlight_style(Style::new().bg(Color::Rgb(38, 38, 58)).bold()),
         inner,
@@ -283,6 +286,7 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
         .copied()
         .unwrap_or(0);
     render_compute_chart(f, rows[1], tx, selected_node, false);
+    clickable_rows(app, inner, visible.len());
 }
 
 fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
@@ -384,6 +388,13 @@ fn accounts(f: &mut Frame, area: Rect, app: &mut App) {
             ]))
         })
         .collect();
+    let keys: Vec<String> = rows.iter().map(|&i| tx.accounts[i].key.clone()).collect();
+    for (row, key) in keys.into_iter().take(inner.height as usize).enumerate() {
+        app.push_hit(
+            Rect { x: inner.x, y: inner.y + row as u16, width: inner.width, height: 1 },
+            Click::Inspect(key),
+        );
+    }
     f.render_stateful_widget(
         List::new(items).highlight_style(Style::new().bg(Color::Rgb(38, 38, 58))),
         inner,
@@ -414,6 +425,7 @@ fn state_diff(f: &mut Frame, area: Rect, app: &mut App) {
             ]))
         })
         .collect();
+    clickable_rows(app, inner, items.len());
     f.render_stateful_widget(
         List::new(items).highlight_style(Style::new().bg(Color::Rgb(38, 38, 58))),
         inner,
@@ -440,6 +452,7 @@ fn logs(f: &mut Frame, area: Rect, app: &mut App) {
             ListItem::new(Line::styled(line.clone(), style))
         })
         .collect();
+    clickable_rows(app, inner, items.len());
     f.render_stateful_widget(
         List::new(items).highlight_style(Style::new().bg(Color::Rgb(38, 38, 58))),
         inner,
@@ -449,13 +462,104 @@ fn logs(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn raw(f: &mut Frame, area: Rect, app: &mut App) {
     let Some((tx, inner)) = require_tx(f, area, app, "RAW DATA") else { return };
-    let text = crate::solana::load(&tx.signature)
+    let text = crate::solana::load(&app.cluster, &tx.signature)
         .and_then(|v| serde_json::to_string_pretty(&v).ok())
         .unwrap_or_else(|| "cache entry unavailable".to_string());
     f.render_widget(
         Paragraph::new(text).style(muted()).scroll((app.scroll as u16, 0)),
         inner,
     );
+}
+
+fn clickable_rows(app: &mut App, area: Rect, count: usize) {
+    for row in 0..count.min(area.height as usize) {
+        app.push_hit(
+            Rect { x: area.x, y: area.y + row as u16, width: area.width, height: 1 },
+            Click::Row(row),
+        );
+    }
+}
+
+fn account_info(f: &mut Frame, area: Rect, app: &mut App) {
+    let block = panel("ACCOUNT INFO", !app.focus_nav);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let Some(account) = &app.account else {
+        f.render_widget(
+            wrapped("no account loaded — press o and paste an address, or click one in Accounts", muted()),
+            inner,
+        );
+        return;
+    };
+
+    let rows = Layout::vertical([Constraint::Length(7), Constraint::Min(3)]).split(inner);
+    let header = vec![
+        Line::from(vec![
+            Span::styled(account.key.clone(), Style::new().fg(Color::White).bold()),
+            Span::raw("  "),
+            chip(if account.executable { "program" } else { "account" }, ACCENT),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("BALANCE   ", muted()),
+            Span::styled(format!("{:.9} SOL", account.lamports as f64 / 1e9), Style::new().fg(ACCENT).bold()),
+            Span::styled(format!("  ({} lamports)", thousands(account.lamports)), muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("OWNER     ", muted()),
+            Span::raw(account.owner_name()),
+            Span::styled(format!("  {}", account.owner), muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("SIZE      ", muted()),
+            Span::raw(format!("{} bytes", thousands(account.data.len() as u64))),
+            Span::styled("    RENT EPOCH  ", muted()),
+            Span::raw(if account.rent_epoch == u64::MAX {
+                "exempt".to_string()
+            } else {
+                account.rent_epoch.to_string()
+            }),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(header), rows[0]);
+
+    let dump = panel("DATA (hex)", false);
+    let dump_inner = dump.inner(rows[1]);
+    f.render_widget(dump, rows[1]);
+    if account.data.is_empty() {
+        f.render_widget(wrapped("account holds no data", muted()), dump_inner);
+        return;
+    }
+
+    let lines: Vec<Line> = account
+        .data
+        .chunks(16)
+        .skip(app.scroll)
+        .take(dump_inner.height as usize)
+        .enumerate()
+        .map(|(row, chunk)| {
+            let offset = (app.scroll + row) * 16;
+            let hex = chunk
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .chunks(8)
+                .map(|half| half.join(" "))
+                .collect::<Vec<_>>()
+                .join("  ");
+            let ascii: String = chunk
+                .iter()
+                .map(|b| if b.is_ascii_graphic() { *b as char } else { '·' })
+                .collect();
+            Line::from(vec![
+                Span::styled(format!("{offset:08x}  "), muted()),
+                Span::styled(format!("{hex:<50}"), Style::new().fg(Color::Rgb(96, 165, 250))),
+                Span::styled(format!(" │{ascii}"), muted()),
+            ])
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), dump_inner);
 }
 
 fn help(f: &mut Frame, area: Rect) {
