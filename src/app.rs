@@ -11,6 +11,7 @@ pub const CLUSTERS: [&str; 4] = ["mainnet", "devnet", "testnet", "localnet"];
 pub enum Click {
     Workspace(Screen),
     Entry(usize),
+    Back,
     ClusterMenu,
     Cluster(&'static str),
     Explorer,
@@ -67,11 +68,23 @@ impl Screen {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Sidebar {
+    Entities,
+    Screens,
+}
+
 pub enum Mode {
     Normal,
     Search,
     Open(String),
     Help,
+}
+
+pub struct Location {
+    pub kind: Kind,
+    pub key: String,
+    pub screen: Screen,
 }
 
 pub struct App {
@@ -81,6 +94,8 @@ pub struct App {
     pub kind: Kind,
     pub entries: Vec<Entry>,
     pub entry_index: usize,
+    pub sidebar: Sidebar,
+    pub stack: Vec<Location>,
     pub focus_nav: bool,
     pub list: ListState,
     pub collapsed: HashSet<usize>,
@@ -106,6 +121,8 @@ impl App {
             screen: Screen::Overview,
             kind: Kind::Tx,
             entry_index: 0,
+            sidebar: Sidebar::Entities,
+            stack: Vec::new(),
             focus_nav: false,
             list: ListState::default().with_selected(Some(0)),
             collapsed: HashSet::new(),
@@ -130,12 +147,58 @@ impl App {
         }
     }
 
+    fn push_location(&mut self, next_key: &str) {
+        let Some(key) = self.loaded_key() else { return };
+        if key == next_key {
+            return;
+        }
+        self.stack.push(Location { kind: self.kind, key, screen: self.screen });
+    }
+
+    pub fn drill_into_account(&mut self, pubkey: &str) {
+        self.push_location(pubkey);
+        self.load_account(pubkey);
+    }
+
+    pub fn back(&mut self) -> bool {
+        let Some(location) = self.stack.pop() else { return false };
+        let in_memory = match location.kind {
+            Kind::Tx => self.tx().is_some_and(|tx| tx.signature == location.key),
+            Kind::Account => self.account.as_ref().is_some_and(|a| a.key == location.key),
+        };
+        if in_memory {
+            self.kind = location.kind;
+            self.sidebar = Sidebar::Screens;
+            self.message.clear();
+        } else {
+            match location.kind {
+                Kind::Tx => self.load_transaction(&location.key),
+                Kind::Account => self.load_account(&location.key),
+            }
+        }
+        if self.message.is_empty() {
+            self.goto(location.screen);
+        }
+        true
+    }
+
     pub fn open_transaction(&mut self, signature: &str) {
+        self.stack.clear();
+        self.load_transaction(signature);
+    }
+
+    pub fn open_account(&mut self, pubkey: &str) {
+        self.stack.clear();
+        self.load_account(pubkey);
+    }
+
+    fn load_transaction(&mut self, signature: &str) {
         match solana::fetch(&self.cluster, signature) {
             Ok(value) => {
                 self.tx = Some(solana::parse(signature, &self.cluster, &value));
                 self.collapsed.clear();
                 self.kind = Kind::Tx;
+                self.sidebar = Sidebar::Screens;
                 self.goto(Screen::Overview);
                 self.refresh_history();
                 self.message.clear();
@@ -144,11 +207,12 @@ impl App {
         }
     }
 
-    pub fn open_account(&mut self, pubkey: &str) {
+    fn load_account(&mut self, pubkey: &str) {
         match solana::fetch_account(&self.cluster, pubkey) {
             Ok(value) => {
                 self.account = Some(solana::parse_account(pubkey, &value));
                 self.kind = Kind::Account;
+                self.sidebar = Sidebar::Screens;
                 self.goto(Screen::Info);
                 self.refresh_history();
                 self.message.clear();
@@ -186,11 +250,17 @@ impl App {
         self.cluster = cluster.to_string();
         self.message.clear();
         self.refresh_history();
-        if let Some(signature) = self.tx().map(|tx| tx.signature.clone()) {
-            self.open_transaction(&signature);
-        }
-        if let Some(key) = self.account.as_ref().map(|a| a.key.clone()) {
-            self.open_account(&key);
+        match self.kind {
+            Kind::Tx => {
+                if let Some(signature) = self.tx().map(|tx| tx.signature.clone()) {
+                    self.load_transaction(&signature);
+                }
+            }
+            Kind::Account => {
+                if let Some(key) = self.account.as_ref().map(|a| a.key.clone()) {
+                    self.load_account(&key);
+                }
+            }
         }
     }
 
@@ -228,8 +298,9 @@ impl App {
         match hit {
             Some(Click::Workspace(screen)) => {
                 self.goto(screen);
-                self.focus_nav = false;
+                self.focus_nav = true;
             }
+            Some(Click::Back) => self.back_to_entities(),
             Some(Click::ClusterMenu) => self.toggle_cluster_menu(),
             Some(Click::Cluster(cluster)) => self.set_cluster(cluster),
             Some(Click::Explorer) => self.open_in_explorer(),
@@ -238,10 +309,10 @@ impl App {
                 self.list.select(Some(index));
             }
             Some(Click::Entry(index)) => {
-                self.focus_nav = true;
+                self.entry_index = index;
                 self.open_entry(index);
             }
-            Some(Click::Inspect(key)) => self.open_account(&key),
+            Some(Click::Inspect(key)) => self.drill_into_account(&key),
             None => self.cluster_menu = false,
         }
     }
@@ -254,6 +325,12 @@ impl App {
         self.screen = screen;
         self.list.select(Some(0));
         self.scroll = 0;
+    }
+
+    pub fn back_to_entities(&mut self) {
+        self.sidebar = Sidebar::Entities;
+        self.focus_nav = true;
+        self.stack.clear();
     }
 
     pub fn screens(&self) -> &'static [Screen] {
@@ -295,6 +372,25 @@ impl App {
             }
         }
         visible
+    }
+
+    pub fn selected_account(&self) -> Option<String> {
+        let row = self.list.selected()?;
+        match self.screen {
+            Screen::Accounts => {
+                let index = *self.account_rows().get(row)?;
+                self.tx().map(|tx| tx.accounts[index].key.clone())
+            }
+            Screen::StateDiff => {
+                let index = *self.balance_rows().get(row)?;
+                self.tx().map(|tx| tx.balances[index].key.clone())
+            }
+            Screen::Execution | Screen::Overview => {
+                let node = self.selected_node()?;
+                self.tx().map(|tx| tx.nodes[node].program.clone())
+            }
+            _ => None,
+        }
     }
 
     pub fn selected_node(&self) -> Option<usize> {

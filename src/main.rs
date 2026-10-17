@@ -13,7 +13,7 @@ use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::prelude::*;
 
-use app::{App, CLUSTERS, Mode, Screen};
+use app::{App, CLUSTERS, Mode, Screen, Sidebar};
 #[cfg(test)]
 use app::Click;
 
@@ -152,32 +152,34 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
             app.mode = Mode::Normal;
             app.search.clear();
             app.message.clear();
+            if !app.focus_nav {
+                app.focus_nav = true;
+            } else if !app.back() {
+                app.back_to_entities();
+            }
         }
-        KeyCode::Tab => app.cycle_screen(1),
+        KeyCode::Tab => {
+            if app.sidebar == Sidebar::Screens {
+                app.cycle_screen(1);
+            } else {
+                app.focus_nav = !app.focus_nav;
+            }
+        }
         KeyCode::BackTab => app.cycle_screen(-1),
-        KeyCode::Char('w') => app.focus_nav = !app.focus_nav,
         KeyCode::Char('x') => app.open_in_explorer(),
         KeyCode::Char('c') => app.toggle_cluster_menu(),
-        KeyCode::Char(c @ '1'..='6') => {
-            let index = c as usize - '1' as usize;
-            if let Some(screen) = app.screens().get(index).copied() {
-                app.goto(screen);
-            }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if app.focus_nav {
+        KeyCode::Down | KeyCode::Char('j') => match (app.focus_nav, app.sidebar) {
+            (true, Sidebar::Entities) => {
                 app.entry_index = (app.entry_index + 1).min(app.entries.len().saturating_sub(1));
-            } else {
-                move_selection(app, 1);
             }
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            if app.focus_nav {
-                app.entry_index = app.entry_index.saturating_sub(1);
-            } else {
-                move_selection(app, -1);
-            }
-        }
+            (true, Sidebar::Screens) => app.cycle_screen(1),
+            _ => move_selection(app, 1),
+        },
+        KeyCode::Up | KeyCode::Char('k') => match (app.focus_nav, app.sidebar) {
+            (true, Sidebar::Entities) => app.entry_index = app.entry_index.saturating_sub(1),
+            (true, Sidebar::Screens) => app.cycle_screen(-1),
+            _ => move_selection(app, -1),
+        },
         KeyCode::PageDown => move_selection(app, 10),
         KeyCode::PageUp => move_selection(app, -10),
         KeyCode::Char('g') => move_selection(app, isize::MIN / 2),
@@ -194,14 +196,15 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
                 app.focus_nav = true;
             }
         }
-        KeyCode::Enter => {
-            if app.focus_nav {
-                app.open_entry(app.entry_index);
-            } else {
-                let collapsed = app.selected_node().is_some_and(|i| app.collapsed.contains(&i));
-                toggle_collapse(app, !collapsed);
+        KeyCode::Enter => match (app.focus_nav, app.sidebar) {
+            (true, Sidebar::Entities) => app.open_entry(app.entry_index),
+            (true, Sidebar::Screens) => app.focus_nav = false,
+            _ => {
+                if let Some(key) = app.selected_account() {
+                    app.drill_into_account(&key);
+                }
             }
-        }
+        },
         KeyCode::Char('r') => {
             if app.kind == solana::Kind::Account {
                 if let Some(key) = app.account.as_ref().map(|a| a.key.clone()) {
@@ -293,7 +296,10 @@ mod tests {
         let mut app = App::new("devnet".into());
         app.tx = Some(solana::parse("4vK9mP", "devnet", &fixture()));
         app.kind = solana::Kind::Tx;
+        app.sidebar = Sidebar::Screens;
+        app.cluster = "devnet".into();
         app.goto(Screen::Execution);
+        app.focus_nav = false;
         app
     }
 
@@ -351,14 +357,16 @@ mod tests {
     #[test]
     fn navigation_switches_workspaces_and_modes() {
         let mut app = loaded();
-        on_key(&mut app, KeyEvent::from(KeyCode::Char('4')));
+        on_key(&mut app, KeyEvent::from(KeyCode::Tab));
+        on_key(&mut app, KeyEvent::from(KeyCode::Tab));
         assert!(render(&mut app, 120, 34).contains("STATE DIFF"));
-        on_key(&mut app, KeyEvent::from(KeyCode::Char('5')));
+        on_key(&mut app, KeyEvent::from(KeyCode::Tab));
         assert!(render(&mut app, 120, 34).contains("PROGRAM LOGS"));
         on_key(&mut app, KeyEvent::from(KeyCode::Char('o')));
         on_key(&mut app, KeyEvent::from(KeyCode::Char('7')));
         assert!(render(&mut app, 120, 34).contains("signature › 7"));
         on_key(&mut app, KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(app.mode, Mode::Normal));
         on_key(&mut app, KeyEvent::from(KeyCode::Char('?')));
         assert!(render(&mut app, 120, 34).contains("expand / collapse"));
         on_key(&mut app, KeyEvent::from(KeyCode::Char('q')));
@@ -461,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_tab_switches_screen() {
+    fn clicking_a_sidebar_screen_switches_view() {
         let mut app = loaded();
         render(&mut app, 120, 34);
         let tab = app
@@ -469,27 +477,109 @@ mod tests {
             .iter()
             .find(|hit| hit.click == Click::Workspace(Screen::Logs))
             .map(|hit| (hit.area.x, hit.area.y))
-            .expect("tab is clickable");
+            .expect("sidebar screen row is clickable");
         app.click(tab.0, tab.1);
         assert!(render(&mut app, 120, 34).contains("PROGRAM LOGS"));
     }
 
     #[test]
-    fn tabs_follow_the_loaded_entity_kind() {
+    fn sidebar_swaps_between_history_and_entity_screens() {
         let mut app = loaded();
         let screen = render(&mut app, 120, 34);
-        assert!(screen.contains("1 Overview"));
-        assert!(screen.contains("5 Logs"));
-        assert!(!screen.contains("Info"));
+        assert!(screen.contains("← History"));
+        assert!(screen.contains("Overview"));
+        assert!(screen.contains("Logs"));
+        assert!(!screen.contains("HISTORY —"));
 
         app.account = Some(solana::parse_account("8tK4iuyx", &account_fixture()));
         app.kind = solana::Kind::Account;
         app.goto(Screen::Info);
         let screen = render(&mut app, 120, 34);
-        assert!(screen.contains("1 Info"));
-        assert!(screen.contains("2 Data"));
-        assert!(screen.contains("3 Raw"));
+        assert!(screen.contains("Data"));
         assert!(!screen.contains("Execution"));
+
+        on_key(&mut app, KeyEvent::from(KeyCode::Esc));
+        on_key(&mut app, KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.sidebar, Sidebar::Entities);
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("HISTORY"));
+        assert!(!screen.contains("← History"));
+    }
+
+    #[test]
+    fn topbar_shows_only_the_loaded_entity() {
+        let mut app = loaded();
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("Slot 312,441,221"));
+        assert!(screen.contains("CU 12,620"));
+
+        app.account = Some(solana::parse_account("8tK4iuyx", &account_fixture()));
+        app.kind = solana::Kind::Account;
+        app.goto(Screen::Info);
+        let screen = render(&mut app, 120, 34);
+        assert!(!screen.contains("Slot 312,441,221"));
+        assert!(!screen.contains("CU 12,620"));
+        assert!(screen.contains("Balance 0.002039280 SOL"));
+        assert!(screen.contains("Size 82 B"));
+    }
+
+    #[test]
+    fn escape_pages_back_through_visited_entities() {
+        let mut app = loaded();
+        app.goto(Screen::Accounts);
+        app.account = Some(solana::parse_account("8tK4iuyx", &account_fixture()));
+        app.kind = solana::Kind::Account;
+        app.sidebar = Sidebar::Screens;
+        app.stack.push(app::Location {
+            kind: solana::Kind::Tx,
+            key: "4vK9mP".into(),
+            screen: Screen::Accounts,
+        });
+        app.goto(Screen::Info);
+        app.focus_nav = true;
+
+        on_key(&mut app, KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.kind, solana::Kind::Tx);
+        assert!(matches!(app.screen, Screen::Accounts));
+        assert_eq!(app.sidebar, Sidebar::Screens);
+
+        on_key(&mut app, KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.sidebar, Sidebar::Entities);
+    }
+
+    #[test]
+    fn opening_an_entity_directly_clears_the_back_stack() {
+        let mut app = loaded();
+        app.stack.push(app::Location {
+            kind: solana::Kind::Tx,
+            key: "4vK9mP".into(),
+            screen: Screen::Accounts,
+        });
+
+        app.open_account("8tK4iuyx");
+        assert!(app.stack.is_empty(), "history/prompt navigation starts a fresh stack");
+
+        app.account = Some(solana::parse_account("8tK4iuyx", &account_fixture()));
+        app.kind = solana::Kind::Account;
+        app.focus_nav = true;
+        on_key(&mut app, KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.sidebar, Sidebar::Entities);
+    }
+
+    #[test]
+    fn enter_on_an_account_row_fetches_that_account() {
+        let mut app = loaded();
+        app.goto(Screen::Accounts);
+        app.list.select(Some(1));
+        let key = app.selected_account().expect("account row resolves to a pubkey");
+        assert_eq!(key, "Vau1t111");
+
+        app.goto(Screen::Execution);
+        app.list.select(Some(1));
+        assert_eq!(
+            app.selected_account().as_deref(),
+            Some("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+        );
     }
 
     #[test]
@@ -509,6 +599,7 @@ mod tests {
                 detail: "   82 B  Token Program".into(),
             },
         ];
+        app.sidebar = Sidebar::Entities;
         let screen = render(&mut app, 120, 34);
         assert!(screen.contains("tx:4GbW…5uRa"));
         assert!(screen.contains("acc:EPjF…Dt1v"));

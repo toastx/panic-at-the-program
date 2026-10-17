@@ -24,14 +24,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         render_nav(f, columns[0], app);
     }
 
-    let tabs_area = Rect {
-        x: columns[1].x,
-        y: columns[1].y,
-        width: columns[1].width + columns[2].width,
-        height: 1,
-    };
-    render_tabs(f, tabs_area, app);
-    let body = Rect { y: columns[1].y + 1, height: columns[1].height - 1, ..columns[1] };
+    let body = columns[1];
 
     match app.screen {
         Screen::Overview => overview(f, body, app),
@@ -45,11 +38,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     if detail {
-        detail_panel(
-            f,
-            Rect { y: columns[2].y + 1, height: columns[2].height - 1, ..columns[2] },
-            app,
-        );
+        detail_panel(f, columns[2], app);
     }
     footer(f, rows[2], app);
 
@@ -89,15 +78,16 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("←→", Style::new().fg(ACCENT)),
             Span::styled(" collapse  ", muted()),
             Span::styled("Enter", Style::new().fg(ACCENT)),
-            Span::styled(" inspect  ", muted()),
-            Span::styled("Tab", Style::new().fg(ACCENT)),
-            Span::styled(" screen  ", muted()),
-            Span::styled("w", Style::new().fg(ACCENT)),
-            Span::styled(" sidebar  ", muted()),
+            Span::styled(
+                if app.focus_nav { " open  " } else { " inspect account  " },
+                muted(),
+            ),
+            Span::styled("Esc", Style::new().fg(ACCENT)),
+            Span::styled(" back  ", muted()),
             Span::styled("/", Style::new().fg(ACCENT)),
             Span::styled(" search  ", muted()),
             Span::styled("o", Style::new().fg(ACCENT)),
-            Span::styled(" open  ", muted()),
+            Span::styled(" load  ", muted()),
             Span::styled("q", Style::new().fg(ACCENT)),
             Span::styled(" quit", muted()),
         ]),
@@ -614,10 +604,9 @@ fn help(f: &mut Frame, area: Rect) {
     let keys = [
         ("↑ ↓ / j k", "move selection"),
         ("→ / ←", "expand / collapse CPI node"),
-        ("Enter", "open entry (sidebar) / toggle node"),
+        ("Enter", "open entry · inspect account"),
+        ("Esc", "leave panel / back to history"),
         ("Tab", "next screen for this entity"),
-        ("w", "focus the sidebar entity list"),
-        ("1-6", "jump to screen"),
         ("/", "search current view"),
         ("o", "open a transaction signature"),
         ("r", "refetch, bypassing cache"),

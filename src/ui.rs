@@ -1,9 +1,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::{App, CLUSTERS, Click};
-use crate::solana::Kind;
-use crate::solana::{Node, Status, Tx};
+use crate::app::{App, CLUSTERS, Click, Sidebar};
+use crate::solana::{Kind, Node, Status, Tx};
 
 pub const ACCENT: Color = Color::Rgb(139, 122, 255);
 pub const OK: Color = Color::Rgb(74, 222, 128);
@@ -102,32 +101,52 @@ pub fn render_topbar(f: &mut Frame, area: Rect, app: &mut App) {
     app.cluster_button = Rect { x, y: area.y, width, height: 1 };
     app.push_hit(app.cluster_button, Click::ClusterMenu);
     spans.push(Span::styled("│", muted()));
-    if let Some(tx) = &app.tx {
-        let pct = tx.cu as f64 / tx.cu_limit.max(1) as f64;
-        spans.extend([
-            Span::raw(format!(" {} ", short(&tx.signature))),
-            chip(
-                match tx.status {
-                    Status::Ok => "✓ Success",
-                    Status::Failed => "✕ Failed",
-                },
-                status_color(tx.status),
-            ),
-            Span::styled("  Slot ", muted()),
-            Span::raw(thousands(tx.slot)),
-            Span::styled("  Fee ", muted()),
-            Span::raw(format!("{:.9} SOL", tx.fee as f64 / 1e9)),
-            Span::styled("  CU ", muted()),
-            Span::raw(format!(
-                "{}/{} ({:.0}%) ",
-                thousands(tx.cu as u64),
-                thousands(tx.cu_limit as u64),
-                pct * 100.0
-            )),
-        ]);
-        spans.extend(bar((pct * 10.0) as usize, 10, ACCENT));
-    } else {
-        spans.push(Span::styled(" nothing loaded — press o or click a cached row", muted()));
+
+    match (app.kind, app.tx.as_ref(), app.account.as_ref()) {
+        (Kind::Tx, Some(tx), _) => {
+            let pct = tx.cu as f64 / tx.cu_limit.max(1) as f64;
+            spans.extend([
+                Span::raw(format!(" {} ", short(&tx.signature))),
+                chip(
+                    match tx.status {
+                        Status::Ok => "✓ Success",
+                        Status::Failed => "✕ Failed",
+                    },
+                    status_color(tx.status),
+                ),
+                Span::styled("  Slot ", muted()),
+                Span::raw(thousands(tx.slot)),
+                Span::styled("  Fee ", muted()),
+                Span::raw(format!("{:.9} SOL", tx.fee as f64 / 1e9)),
+                Span::styled("  CU ", muted()),
+                Span::raw(format!(
+                    "{}/{} ({:.0}%) ",
+                    thousands(tx.cu as u64),
+                    thousands(tx.cu_limit as u64),
+                    pct * 100.0
+                )),
+            ]);
+            spans.extend(bar((pct * 10.0) as usize, 10, ACCENT));
+        }
+        (Kind::Account, _, Some(account)) => {
+            spans.extend([
+                Span::raw(format!(" {} ", short(&account.key))),
+                chip(
+                    if account.executable { "program" } else { "account" },
+                    Color::Rgb(96, 165, 250),
+                ),
+                Span::styled("  Balance ", muted()),
+                Span::raw(format!("{:.9} SOL", account.lamports as f64 / 1e9)),
+                Span::styled("  Owner ", muted()),
+                Span::raw(account.owner_name()),
+                Span::styled("  Size ", muted()),
+                Span::raw(format!("{} B", thousands(account.data.len() as u64))),
+            ]);
+        }
+        _ => spans.push(Span::styled(
+            " nothing loaded — press o or pick a cached entry",
+            muted(),
+        )),
     }
 
     let button = " ↗ Explorer ";
@@ -190,11 +209,34 @@ pub fn render_cluster_menu(f: &mut Frame, app: &mut App) {
 }
 
 pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
-    let block = panel("WORKSPACE", app.focus_nav);
+    match app.sidebar {
+        Sidebar::Entities => render_entities(f, area, app),
+        Sidebar::Screens => render_screens(f, area, app),
+    }
+}
+
+fn nav_help(f: &mut Frame, area: Rect, keys: &[(&str, &str)]) {
+    f.render_widget(
+        Paragraph::new(
+            keys.iter()
+                .map(|(k, v)| {
+                    Line::from(vec![
+                        Span::styled(format!("{k:>5} "), Style::new().fg(ACCENT)),
+                        Span::styled(*v, muted()),
+                    ])
+                })
+                .collect::<Vec<_>>(),
+        ),
+        area,
+    );
+}
+
+fn render_entities(f: &mut Frame, area: Rect, app: &mut App) {
+    let block = panel("HISTORY", app.focus_nav);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let help_height = if inner.height >= 14 { 6 } else { 0 };
+    let help_height = if inner.height >= 14 { 5 } else { 0 };
     let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(help_height)]).split(inner);
 
     if app.entries.is_empty() {
@@ -214,18 +256,23 @@ pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
                 Kind::Tx => ("tx:", Color::Rgb(96, 165, 250)),
                 Kind::Account => ("acc:", ACCENT),
             };
-            Line::from(vec![
+            ListItem::new(Line::from(vec![
                 Span::styled(
                     match entry.status {
-                        Some(status) => if status == crate::solana::Status::Ok { "✓ " } else { "✕ " },
+                        Some(status) => {
+                            if status == crate::solana::Status::Ok {
+                                "✓ "
+                            } else {
+                                "✕ "
+                            }
+                        }
                         None => "· ",
                     },
                     Style::new().fg(entry.status.map_or(MUTED, status_color)),
                 ),
                 Span::styled(tag, Style::new().fg(color)),
                 Span::raw(short(&entry.key)),
-            ])
-            .into()
+            ]))
         })
         .collect();
 
@@ -247,52 +294,66 @@ pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
         &mut state,
     );
 
-    if help_height == 0 {
-        return;
+    if help_height > 0 {
+        nav_help(
+            f,
+            rows[1],
+            &[("Enter", "open"), ("o", "load"), ("c", "cluster"), ("?", "help")],
+        );
     }
-    let keys = [
-        ("Enter", "open"),
-        ("Tab", "screen"),
-        ("c", "cluster"),
-        ("o", "load"),
-        ("?", "help"),
-    ];
-    f.render_widget(
-        Paragraph::new(
-            keys.iter()
-                .map(|(k, v)| {
-                    Line::from(vec![
-                        Span::styled(format!("{k:>5} "), Style::new().fg(ACCENT)),
-                        Span::styled(*v, muted()),
-                    ])
-                })
-                .collect::<Vec<_>>(),
-        ),
-        rows[1],
-    );
 }
 
-pub fn render_tabs(f: &mut Frame, area: Rect, app: &mut App) {
-    let mut spans = Vec::new();
-    let mut x = area.x;
-    for (i, screen) in app.screens().iter().enumerate() {
-        let active = *screen == app.screen;
-        let label = format!(" {} {} ", i + 1, screen.title());
-        let width = label.chars().count() as u16;
-        spans.push(Span::styled(
-            label,
-            if active {
-                Style::new().fg(ACCENT).bg(Color::Rgb(38, 38, 58)).bold()
-            } else {
-                muted()
-            },
-        ));
-        app.push_hit(Rect { x, y: area.y, width, height: 1 }, Click::Workspace(*screen));
-        x += width;
-        spans.push(Span::styled("│", Style::new().fg(PANEL)));
-        x += 1;
+fn render_screens(f: &mut Frame, area: Rect, app: &mut App) {
+    let title = match app.loaded_key() {
+        Some(key) => short(&key),
+        None => "—".to_string(),
+    };
+    let block = panel(&title, app.focus_nav);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let help_height = if inner.height >= 14 { 5 } else { 0 };
+    let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(1), Constraint::Length(help_height)])
+        .split(inner);
+
+    let back = Rect { x: rows[0].x, y: rows[0].y, width: rows[0].width, height: 1 };
+    f.render_widget(
+        Paragraph::new(Line::styled("← History", Style::new().fg(ACCENT))),
+        back,
+    );
+    app.push_hit(back, Click::Back);
+
+    let screens = app.screens();
+    let items: Vec<ListItem> = screens
+        .iter()
+        .map(|screen| ListItem::new(Line::raw(format!("  {}", screen.title()))))
+        .collect();
+
+    for (i, screen) in screens.iter().enumerate() {
+        let y = rows[1].y + i as u16;
+        if y < rows[1].y + rows[1].height {
+            app.push_hit(Rect { x: rows[1].x, y, width: rows[1].width, height: 1 }, Click::Workspace(*screen));
+        }
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    let mut state = ListState::default().with_selected(Some(app.screen_index()));
+    f.render_stateful_widget(
+        List::new(items).highlight_style(if app.focus_nav {
+            Style::new().fg(ACCENT).bg(Color::Rgb(38, 38, 58)).bold()
+        } else {
+            Style::new().fg(ACCENT).bold()
+        }),
+        rows[1],
+        &mut state,
+    );
+
+    if help_height > 0 {
+        nav_help(
+            f,
+            rows[2],
+            &[("Enter", "inspect"), ("Esc", "history"), ("x", "explorer"), ("?", "help")],
+        );
+    }
 }
 
 pub fn render_compute_chart(f: &mut Frame, area: Rect, tx: &Tx, selected: usize, focused: bool) {
