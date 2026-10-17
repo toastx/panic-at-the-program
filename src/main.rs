@@ -73,7 +73,7 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
             app.mode = Mode::Normal;
             return;
         }
-        Mode::Search(buffer) | Mode::Open(buffer) => {
+        Mode::Open(buffer) => {
             match key.code {
                 KeyCode::Char(c) => buffer.push(c),
                 KeyCode::Backspace => {
@@ -82,15 +82,30 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
                 KeyCode::Esc => app.mode = Mode::Normal,
                 KeyCode::Enter => {
                     let input = buffer.trim().to_string();
-                    if let Mode::Open(_) = app.mode {
-                        app.mode = Mode::Normal;
-                        if !input.is_empty() {
-                            app.open(&input);
-                        }
+                    app.mode = Mode::Normal;
+                    if !input.is_empty() {
+                        app.open(&input);
                     }
                 }
                 _ => {}
             }
+            return;
+        }
+        Mode::Search => {
+            match key.code {
+                KeyCode::Char(c) => app.search.push(c),
+                KeyCode::Backspace => {
+                    app.search.pop();
+                }
+                KeyCode::Esc => {
+                    app.search.clear();
+                    app.mode = Mode::Normal;
+                }
+                KeyCode::Enter => app.mode = Mode::Normal,
+                _ => {}
+            }
+            app.list.select(Some(0));
+            app.jump_to_match();
             return;
         }
         Mode::Normal => {}
@@ -100,9 +115,14 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('q') => app.quit = true,
         KeyCode::Char('?') => app.mode = Mode::Help,
         KeyCode::Char('o') => app.mode = Mode::Open(String::new()),
-        KeyCode::Char('/') => app.mode = Mode::Search(String::new()),
+        KeyCode::Char('/') => {
+            app.mode = Mode::Search;
+            app.search.clear();
+        }
+        KeyCode::Char('n') => app.jump_to_match(),
         KeyCode::Esc => {
             app.mode = Mode::Normal;
+            app.search.clear();
             app.message.clear();
         }
         KeyCode::Tab => app.focus_nav = !app.focus_nav,
@@ -146,10 +166,12 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Enter => match app.screen {
             Screen::History => {
+                let rows = app.history_rows();
                 if let Some(signature) = app
                     .list
                     .selected()
-                    .and_then(|i| app.history.get(i))
+                    .and_then(|i| rows.get(i))
+                    .and_then(|&i| app.history.get(i))
                     .map(|s| s.signature.clone())
                 {
                     app.open(&signature);
@@ -297,6 +319,37 @@ mod tests {
         assert!(screen.contains("SELECTED INSTRUCTION"));
         assert!(screen.contains("8,420 self"));
         assert!(screen.contains("Failed"));
+    }
+
+    #[test]
+    fn search_filters_rows_and_fades_the_tree() {
+        let mut app = loaded();
+        app.goto(Screen::Logs);
+        let all = app.rows();
+        on_key(&mut app, KeyEvent::from(KeyCode::Char('/')));
+        for c in "token".chars() {
+            on_key(&mut app, KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert!(app.rows() < all && app.rows() > 0);
+        assert!(render(&mut app, 120, 34).contains("match(es)"));
+
+        on_key(&mut app, KeyEvent::from(KeyCode::Enter));
+        app.goto(Screen::Execution);
+        app.jump_to_match();
+        assert_eq!(app.selected_node(), Some(1));
+
+        on_key(&mut app, KeyEvent::from(KeyCode::Esc));
+        assert!(app.search.is_empty());
+        assert_eq!(app.rows(), 2);
+    }
+
+    #[test]
+    fn open_prompt_rejects_blank_input() {
+        let mut app = loaded();
+        on_key(&mut app, KeyEvent::from(KeyCode::Char('o')));
+        on_key(&mut app, KeyEvent::from(KeyCode::Enter));
+        assert!(app.message.is_empty());
+        assert!(app.tx.is_some());
     }
 
     #[test]

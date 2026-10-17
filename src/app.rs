@@ -41,7 +41,7 @@ impl Screen {
 
 pub enum Mode {
     Normal,
-    Search(String),
+    Search,
     Open(String),
     Help,
 }
@@ -56,6 +56,7 @@ pub struct App {
     pub collapsed: HashSet<usize>,
     pub history: Vec<Summary>,
     pub mode: Mode,
+    pub search: String,
     pub message: String,
     pub scroll: usize,
     pub quit: bool,
@@ -73,6 +74,7 @@ impl App {
             collapsed: HashSet::new(),
             history: solana::summaries(),
             mode: Mode::Normal,
+            search: String::new(),
             message: String::new(),
             scroll: 0,
             quit: false,
@@ -125,14 +127,89 @@ impl App {
         self.tx.as_ref()
     }
 
+    pub fn matches(&self, text: &str) -> bool {
+        self.search.is_empty() || text.to_lowercase().contains(&self.search.to_lowercase())
+    }
+
+    pub fn history_rows(&self) -> Vec<usize> {
+        self.history
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| self.matches(&s.signature))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    pub fn account_rows(&self) -> Vec<usize> {
+        self.tx().map_or(Vec::new(), |tx| {
+            tx.accounts
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| self.matches(&a.key) || self.matches(a.role()))
+                .map(|(i, _)| i)
+                .collect()
+        })
+    }
+
+    pub fn balance_rows(&self) -> Vec<usize> {
+        self.tx().map_or(Vec::new(), |tx| {
+            tx.balances
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| self.matches(&b.key) || self.matches(&b.label))
+                .map(|(i, _)| i)
+                .collect()
+        })
+    }
+
+    pub fn log_rows(&self) -> Vec<usize> {
+        self.tx().map_or(Vec::new(), |tx| {
+            tx.logs
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| self.matches(line))
+                .map(|(i, _)| i)
+                .collect()
+        })
+    }
+
+    pub fn node_matches(&self, index: usize) -> bool {
+        self.tx()
+            .map(|tx| &tx.nodes[index])
+            .is_some_and(|n| self.matches(&n.label) || self.matches(&n.program) || self.matches(&n.path))
+    }
+
     pub fn rows(&self) -> usize {
         match self.screen {
-            Screen::History => self.history.len(),
+            Screen::History => self.history_rows().len(),
             Screen::Execution | Screen::Overview => self.visible_nodes().len(),
-            Screen::Accounts => self.tx().map_or(0, |t| t.accounts.len()),
-            Screen::StateDiff => self.tx().map_or(0, |t| t.balances.len()),
-            Screen::Logs => self.tx().map_or(0, |t| t.logs.len()),
+            Screen::Accounts => self.account_rows().len(),
+            Screen::StateDiff => self.balance_rows().len(),
+            Screen::Logs => self.log_rows().len(),
             Screen::Raw => 0,
+        }
+    }
+
+    pub fn match_count(&self) -> usize {
+        match self.screen {
+            Screen::Execution | Screen::Overview => {
+                self.visible_nodes().iter().filter(|&&i| self.node_matches(i)).count()
+            }
+            _ => self.rows(),
+        }
+    }
+
+    pub fn jump_to_match(&mut self) {
+        if self.search.is_empty() {
+            return;
+        }
+        let visible = self.visible_nodes();
+        let start = self.list.selected().unwrap_or(0);
+        let hit = (1..=visible.len())
+            .map(|offset| (start + offset) % visible.len().max(1))
+            .find(|&i| visible.get(i).is_some_and(|&n| self.node_matches(n)));
+        if let Some(i) = hit {
+            self.list.select(Some(i));
         }
     }
 }

@@ -44,10 +44,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 fn footer(f: &mut Frame, area: Rect, app: &App) {
     let line = match &app.mode {
-        Mode::Search(query) => Line::from(vec![
+        Mode::Search => Line::from(vec![
             Span::styled(" /", Style::new().fg(ACCENT).bold()),
-            Span::raw(query.clone()),
+            Span::raw(app.search.clone()),
             Span::styled("▏", Style::new().fg(ACCENT)),
+            Span::styled(format!("  {} match(es)  Enter keep · Esc clear", app.match_count()), muted()),
         ]),
         Mode::Open(input) => Line::from(vec![
             Span::styled(" signature › ", Style::new().fg(ACCENT).bold()),
@@ -55,6 +56,14 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("▏", Style::new().fg(ACCENT)),
         ]),
         _ if !app.message.is_empty() => Line::styled(format!(" {}", app.message), Style::new().fg(BAD)),
+        _ if !app.search.is_empty() => Line::from(vec![
+            Span::styled(" filter ", Style::new().fg(ACCENT).bold()),
+            Span::raw(app.search.clone()),
+            Span::styled(
+                format!("  {} match(es)   n next · Esc clear", app.match_count()),
+                muted(),
+            ),
+        ]),
         _ => Line::from(vec![
             Span::styled(" ↑↓", Style::new().fg(ACCENT)),
             Span::styled(" navigate  ", muted()),
@@ -88,9 +97,10 @@ fn history(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let items: Vec<ListItem> = app
-        .history
+    let rows = app.history_rows();
+    let items: Vec<ListItem> = rows
         .iter()
+        .filter_map(|&i| app.history.get(i))
         .map(|s| {
             ListItem::new(Line::from(vec![
                 Span::styled(
@@ -199,14 +209,18 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
     let rows = Layout::vertical([Constraint::Min(5), Constraint::Length(chart_height)]).split(area);
 
     let visible = app.visible_nodes();
+    let searching = !app.search.is_empty();
+    let matched: Vec<bool> = visible.iter().map(|&i| app.node_matches(i)).collect();
     let tx = app.tx.as_ref().unwrap();
     let prefixes = tree_prefixes(&tx.nodes);
     let selected_index = app.list.selected().unwrap_or(0);
 
     let items: Vec<ListItem> = visible
         .iter()
-        .map(|&i| {
+        .enumerate()
+        .map(|(row, &i)| {
             let node = &tx.nodes[i];
+            let faded = searching && !matched[row];
             let collapsed = app.collapsed.contains(&i);
             let marker = match (node.children > 0, collapsed) {
                 (true, true) => "▸ ",
@@ -223,7 +237,7 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
                 (false, 0) => Style::new().fg(Color::White).bold(),
                 _ => Style::new().fg(Color::Rgb(176, 180, 210)),
             };
-            let mut spans = vec![
+            let mut spans: Vec<Span> = vec![
                 Span::styled(format!("{:>5} ", node.path), muted()),
                 Span::styled(prefixes[i].clone(), Style::new().fg(PANEL)),
                 Span::styled(marker, muted()),
@@ -242,6 +256,12 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
                 if let Some(error) = &node.error {
                     spans.push(Span::styled(format!("  ⚠ {error}"), Style::new().fg(BAD)));
                 }
+            }
+            if faded {
+                spans = spans
+                    .into_iter()
+                    .map(|span| Span::styled(span.content, Style::new().fg(PANEL)))
+                    .collect();
             }
             ListItem::new(Line::from(spans))
         })
@@ -343,10 +363,10 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
 
 fn accounts(f: &mut Frame, area: Rect, app: &mut App) {
     let Some((tx, inner)) = require_tx(f, area, app, "ACCOUNTS") else { return };
-    let items: Vec<ListItem> = tx
-        .accounts
+    let rows = app.account_rows();
+    let items: Vec<ListItem> = rows
         .iter()
-        .enumerate()
+        .map(|&i| (i, &tx.accounts[i]))
         .map(|(i, account)| {
             let touches = tx
                 .nodes
@@ -377,9 +397,10 @@ fn state_diff(f: &mut Frame, area: Rect, app: &mut App) {
         f.render_widget(wrapped("no balance changes recorded", muted()), inner);
         return;
     }
-    let items: Vec<ListItem> = tx
-        .balances
+    let rows = app.balance_rows();
+    let items: Vec<ListItem> = rows
         .iter()
+        .map(|&i| &tx.balances[i])
         .map(|change| {
             let delta = change.after - change.before;
             ListItem::new(Line::from(vec![
@@ -401,15 +422,11 @@ fn state_diff(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn logs(f: &mut Frame, area: Rect, app: &mut App) {
-    let filter = match &app.mode {
-        Mode::Search(query) => query.clone(),
-        _ => String::new(),
-    };
+    let rows = app.log_rows();
     let Some((tx, inner)) = require_tx(f, area, app, "PROGRAM LOGS") else { return };
-    let items: Vec<ListItem> = tx
-        .logs
+    let items: Vec<ListItem> = rows
         .iter()
-        .filter(|line| filter.is_empty() || line.to_lowercase().contains(&filter.to_lowercase()))
+        .map(|&i| &tx.logs[i])
         .map(|line| {
             let style = if line.contains("failed") {
                 Style::new().fg(BAD)
