@@ -1,73 +1,95 @@
+mod solana;
+
 use std::io;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use crossterm::execute;
+use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph};
 
-#[derive(Clone, Copy, PartialEq)]
-enum Status {
-    Ok,
-    Failed,
+use solana::{Node, Status, Tx};
+
+struct App {
+    cluster: String,
+    tx: Option<Tx>,
+    trace: ListState,
+    history: Vec<String>,
+    history_state: ListState,
+    message: String,
 }
 
-struct Node {
-    depth: usize,
-    label: &'static str,
-    program: &'static str,
-    cu: u32,
-    status: Status,
-    accounts: &'static [(&'static str, Status)],
+impl App {
+    fn open(&mut self, signature: &str) {
+        self.message = format!("loading {signature}…");
+        match solana::fetch(&self.cluster, signature) {
+            Ok(value) => {
+                self.tx = Some(solana::parse(signature, &self.cluster, &value));
+                self.trace.select(Some(0));
+                self.history = solana::cached();
+                self.message.clear();
+            }
+            Err(err) => self.message = err.to_string(),
+        }
+    }
 }
 
-fn trace() -> Vec<Node> {
-    vec![
-        Node {
-            depth: 0,
-            label: "Vault::withdraw",
-            program: "Vault Program",
-            cu: 42_800,
-            status: Status::Failed,
-            accounts: &[("Vault", Status::Ok), ("Authority", Status::Failed)],
-        },
-        Node {
-            depth: 1,
-            label: "Validate authority",
-            program: "Vault Program",
-            cu: 4_200,
-            status: Status::Ok,
-            accounts: &[("Authority", Status::Ok)],
-        },
-        Node {
-            depth: 1,
-            label: "Verify vault",
-            program: "Vault Program",
-            cu: 6_100,
-            status: Status::Ok,
-            accounts: &[("Vault", Status::Ok), ("Vault PDA", Status::Ok)],
-        },
-        Node {
-            depth: 1,
-            label: "Token::transfer",
-            program: "Token Program",
-            cu: 8_420,
-            status: Status::Failed,
-            accounts: &[
-                ("Vault", Status::Ok),
-                ("Token account", Status::Ok),
-                ("Authority", Status::Failed),
-            ],
-        },
-        Node {
-            depth: 2,
-            label: "Authority check",
-            program: "Token Program",
-            cu: 320,
-            status: Status::Failed,
-            accounts: &[("Authority", Status::Failed)],
-        },
-    ]
+fn main() -> io::Result<()> {
+    let mut args = std::env::args().skip(1);
+    let signature = args.next();
+    let cluster = args.next().unwrap_or_else(|| "devnet".to_string());
+
+    let mut app = App {
+        cluster,
+        tx: None,
+        trace: ListState::default().with_selected(Some(0)),
+        history: solana::cached(),
+        history_state: ListState::default().with_selected(Some(0)),
+        message: String::new(),
+    };
+    if let Some(signature) = &signature {
+        app.open(signature);
+    }
+
+    enable_raw_mode()?;
+    let mut out = io::stdout();
+    execute!(out, EnterAlternateScreen)?;
+    let mut term = Terminal::new(CrosstermBackend::new(out))?;
+
+    loop {
+        term.draw(|f| draw(f, &mut app))?;
+
+        let Event::Key(key) = event::read()? else { continue };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        let list = if app.tx.is_some() { &mut app.trace } else { &mut app.history_state };
+        match key.code {
+            KeyCode::Char('q') => break,
+            KeyCode::Down | KeyCode::Char('j') => list.select_next(),
+            KeyCode::Up | KeyCode::Char('k') => list.select_previous(),
+            KeyCode::Char('h') | KeyCode::Esc => {
+                app.tx = None;
+                app.history = solana::cached();
+            }
+            KeyCode::Enter => {
+                if app.tx.is_none() {
+                    if let Some(signature) = app.history_state.selected().and_then(|i| app.history.get(i)).cloned() {
+                        app.open(&signature);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    disable_raw_mode()?;
+    execute!(term.backend_mut(), LeaveAlternateScreen)?;
+    term.show_cursor()
+}
+
+fn dim() -> Style {
+    Style::new().fg(Color::DarkGray)
 }
 
 fn mark(status: Status) -> Span<'static> {
@@ -77,43 +99,60 @@ fn mark(status: Status) -> Span<'static> {
     }
 }
 
-fn main() -> io::Result<()> {
-    enable_raw_mode()?;
-    let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen)?;
-    let mut term = Terminal::new(CrosstermBackend::new(out))?;
-
-    let nodes = trace();
-    let mut sel = ListState::default().with_selected(Some(0));
-
-    loop {
-        term.draw(|f| draw(f, &nodes, &mut sel))?;
-
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => break,
-                KeyCode::Down | KeyCode::Char('j') => sel.select_next(),
-                KeyCode::Up | KeyCode::Char('k') => sel.select_previous(),
-                _ => {}
-            }
-        }
+fn short(signature: &str) -> String {
+    if signature.len() > 12 {
+        format!("{}…{}", &signature[..4], &signature[signature.len() - 4..])
+    } else {
+        signature.to_string()
     }
-
-    disable_raw_mode()?;
-    execute!(term.backend_mut(), LeaveAlternateScreen)?;
-    term.show_cursor()
 }
 
-fn draw(f: &mut Frame, nodes: &[Node], sel: &mut ListState) {
-    let dim = Style::new().fg(Color::DarkGray);
+fn draw(f: &mut Frame, app: &mut App) {
+    match &app.tx {
+        Some(tx) if !tx.nodes.is_empty() => draw_execution(f, tx, &mut app.trace, &app.message),
+        _ => draw_history(f, app),
+    }
+}
+
+fn draw_history(f: &mut Frame, app: &mut App) {
+    let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(3), Constraint::Length(1)]).split(f.area());
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" SOLWORK", Style::new().fg(Color::Cyan).bold()),
+            Span::raw(format!("    Cluster: {}    CACHED QUERIES: {}", app.cluster, app.history.len())),
+        ])),
+        rows[0],
+    );
+
+    let items: Vec<ListItem> = app.history.iter().map(|s| ListItem::new(s.as_str())).collect();
+    let items = if items.is_empty() {
+        vec![ListItem::new(Span::styled("no cached transactions — run: solwork <signature> [cluster]", dim()))]
+    } else {
+        items
+    };
+    f.render_stateful_widget(
+        List::new(items)
+            .block(Block::new().borders(Borders::ALL).title(" HISTORY "))
+            .highlight_style(Style::new().bg(Color::Rgb(40, 40, 60)).bold()),
+        rows[1],
+        &mut app.history_state,
+    );
+
+    let footer = if app.message.is_empty() {
+        Paragraph::new(" ↑↓ Navigate   Enter Open   q Quit").style(dim())
+    } else {
+        Paragraph::new(format!(" {}", app.message)).style(Style::new().fg(Color::Red))
+    };
+    f.render_widget(footer, rows[2]);
+}
+
+fn draw_execution(f: &mut Frame, tx: &Tx, sel: &mut ListState, message: &str) {
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(6),
-        Constraint::Length(nodes.len() as u16 + 2),
+        Constraint::Length(tx.nodes.len().min(8) as u16 + 2),
         Constraint::Length(1),
     ])
     .split(f.area());
@@ -121,37 +160,37 @@ fn draw(f: &mut Frame, nodes: &[Node], sel: &mut ListState) {
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" SOLWORK", Style::new().fg(Color::Cyan).bold()),
-            Span::raw("    Cluster: Devnet     TX: 4vK...9mP"),
+            Span::raw(format!("    Cluster: {}     TX: {}", tx.cluster, short(&tx.signature))),
         ])),
         rows[0],
     );
 
-    let failed = nodes.iter().any(|n| n.status == Status::Failed);
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::raw(" STATUS  "),
-            if failed {
-                Span::styled("Failed", Style::new().fg(Color::Red).bold())
-            } else {
-                Span::styled("Success", Style::new().fg(Color::Green).bold())
+            match tx.status {
+                Status::Failed => Span::styled("Failed", Style::new().fg(Color::Red).bold()),
+                Status::Ok => Span::styled("Success", Style::new().fg(Color::Green).bold()),
             },
-            Span::styled("     INSTRUCTIONS  ", dim),
-            Span::raw(nodes.len().to_string()),
-            Span::styled("     CU USED  ", dim),
-            Span::raw(format!("{:.1}k", nodes[0].cu as f64 / 1000.0)),
+            Span::styled("     INSTRUCTIONS  ", dim()),
+            Span::raw(tx.nodes.iter().filter(|n| n.depth == 0).count().to_string()),
+            Span::styled("     CU USED  ", dim()),
+            Span::raw(format!("{:.1}k", tx.cu as f64 / 1000.0)),
         ])),
         rows[1],
     );
 
     let mid = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).split(rows[2]);
-    render_trace(f, mid[0], nodes, sel);
-    render_detail(f, mid[1], &nodes[sel.selected().unwrap_or(0)]);
-    render_compute(f, rows[3], nodes);
+    render_trace(f, mid[0], &tx.nodes, sel);
+    render_detail(f, mid[1], &tx.nodes[sel.selected().unwrap_or(0).min(tx.nodes.len() - 1)], tx.cu);
+    render_compute(f, rows[3], &tx.nodes);
 
-    f.render_widget(
-        Paragraph::new(" ↑↓ Navigate   Tab Change panel   q Quit").style(dim),
-        rows[4],
-    );
+    let footer = if message.is_empty() {
+        Paragraph::new(" ↑↓ Navigate   h History   q Quit").style(dim())
+    } else {
+        Paragraph::new(format!(" {message}")).style(Style::new().fg(Color::Red))
+    };
+    f.render_widget(footer, rows[4]);
 }
 
 fn render_trace(f: &mut Frame, area: Rect, nodes: &[Node], sel: &mut ListState) {
@@ -165,8 +204,8 @@ fn render_trace(f: &mut Frame, area: Rect, nodes: &[Node], sel: &mut ListState) 
             };
             let color = if n.status == Status::Failed { Color::Red } else { Color::Reset };
             ListItem::new(Line::from(vec![
-                Span::styled(prefix, Style::new().fg(Color::DarkGray)),
-                Span::styled(n.label, Style::new().fg(color)),
+                Span::styled(prefix, dim()),
+                Span::styled(n.label.clone(), Style::new().fg(color)),
             ]))
         })
         .collect();
@@ -180,7 +219,7 @@ fn render_trace(f: &mut Frame, area: Rect, nodes: &[Node], sel: &mut ListState) 
     );
 }
 
-fn render_detail(f: &mut Frame, area: Rect, node: &Node) {
+fn render_detail(f: &mut Frame, area: Rect, node: &Node, total_cu: u32) {
     let block = Block::new().borders(Borders::ALL).title(" SELECTED ");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -189,8 +228,8 @@ fn render_detail(f: &mut Frame, area: Rect, node: &Node) {
 
     f.render_widget(
         Paragraph::new(vec![
-            Line::styled("PROGRAM", Style::new().fg(Color::DarkGray)),
-            Line::raw(node.program),
+            Line::styled("PROGRAM", dim()),
+            Line::raw(node.program.clone()),
         ]),
         parts[0],
     );
@@ -198,14 +237,14 @@ fn render_detail(f: &mut Frame, area: Rect, node: &Node) {
     f.render_widget(
         Gauge::default()
             .label(format!("{} CU", node.cu))
-            .ratio((node.cu as f64 / 42_800.0).min(1.0))
+            .ratio((node.cu as f64 / total_cu.max(1) as f64).min(1.0))
             .gauge_style(Style::new().fg(Color::Cyan)),
         Rect { height: 1, ..parts[1] },
     );
 
-    let mut lines = vec![Line::styled("ACCOUNTS", Style::new().fg(Color::DarkGray))];
-    lines.extend(node.accounts.iter().map(|(name, status)| {
-        Line::from(vec![mark(*status), Span::raw(format!(" {name}"))])
+    let mut lines = vec![Line::styled("ACCOUNTS", dim())];
+    lines.extend(node.accounts.iter().map(|(key, status)| {
+        Line::from(vec![mark(*status), Span::raw(format!(" {}", short(key)))])
     }));
     f.render_widget(Paragraph::new(lines), parts[2]);
 }
@@ -215,6 +254,7 @@ fn render_compute(f: &mut Frame, area: Rect, nodes: &[Node]) {
     let width = area.width.saturating_sub(28) as u32;
     let lines: Vec<Line> = nodes
         .iter()
+        .take(8)
         .map(|n| {
             let filled = (n.cu * width / max) as usize;
             Line::from(vec![
@@ -235,17 +275,67 @@ fn render_compute(f: &mut Frame, area: Rect, nodes: &[Node]) {
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    use serde_json::json;
+
+    fn fixture() -> serde_json::Value {
+        json!({"result": {
+            "meta": {
+                "err": {"InstructionError": [0, "Custom"]},
+                "computeUnitsConsumed": 12620,
+                "innerInstructions": [{"index": 0, "instructions": [{"programIdIndex": 3, "accounts": [0, 2]}]}],
+                "logMessages": [
+                    "Program Vau1t11111111111111111111111111111111111 invoke [1]",
+                    "Program log: withdraw",
+                    "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [2]",
+                    "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA consumed 8420 of 200000 compute units",
+                    "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA failed: custom program error: 0x4",
+                    "Program Vau1t11111111111111111111111111111111111 consumed 12620 of 200000 compute units",
+                    "Program Vau1t11111111111111111111111111111111111 failed: custom program error: 0x4"
+                ]
+            },
+            "transaction": {"message": {
+                "accountKeys": ["Auth1111", "Vau1t111", "TokenAcct1111", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"],
+                "instructions": [{"programIdIndex": 3, "accounts": [0, 1, 2]}]
+            }}
+        }})
+    }
 
     #[test]
-    fn renders_trace_and_selection() {
-        let nodes = trace();
-        let mut sel = ListState::default().with_selected(Some(3));
+    fn parses_cpi_tree_from_logs() {
+        let tx = solana::parse("4vK9mP", "devnet", &fixture());
+        assert_eq!(tx.nodes.len(), 2);
+        assert_eq!(tx.nodes[0].depth, 0);
+        assert_eq!(tx.nodes[1].depth, 1);
+        assert_eq!(tx.nodes[1].label, "Token Program");
+        assert_eq!(tx.nodes[1].cu, 8420);
+        assert_eq!(tx.nodes[0].cu, 12620);
+        assert!(tx.nodes.iter().all(|n| n.status == Status::Failed));
+        assert_eq!(tx.nodes[1].accounts.len(), 2);
+        assert_eq!(tx.status, Status::Failed);
+    }
+
+    #[test]
+    #[ignore = "network"]
+    fn fetches_and_caches_from_mainnet() {
+        let signature = "32A7NyijRbsu3x6DVt1aKJwhPo27PHWSqgxKe54n2xdjUS68XKMkbhnYivyEjnWZ4gU5TxjgRVQcGLmeh6oP8YhX";
+        let value = solana::fetch("mainnet", signature).unwrap();
+        let tx = solana::parse(signature, "mainnet", &value);
+        assert!(!tx.nodes.is_empty());
+        assert!(tx.cu > 0);
+        assert!(solana::cached().contains(&signature.to_string()));
+        assert!(solana::load(signature).is_some());
+    }
+
+    #[test]
+    fn renders_execution_screen() {
+        let tx = solana::parse("4vK9mP", "devnet", &fixture());
+        let mut sel = ListState::default().with_selected(Some(1));
         let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        term.draw(|f| draw(f, &nodes, &mut sel)).unwrap();
+        term.draw(|f| draw_execution(f, &tx, &mut sel, "")).unwrap();
 
         let text: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("Token::transfer"));
         assert!(text.contains("Token Program"));
         assert!(text.contains("8420 CU"));
+        assert!(text.contains("Failed"));
     }
 }
