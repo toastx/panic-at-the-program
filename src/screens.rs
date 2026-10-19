@@ -136,7 +136,13 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
     let path_height = if path.is_empty() {
         0
     } else {
-        tx.failure.as_ref().map_or(0, |f| f.checks.len() as u16) + 5
+        tx.failure.as_ref().map_or(0, |f| {
+            f.checks.len() as u16
+                + [&f.account, &f.expected, &f.actual, &f.source]
+                    .iter()
+                    .filter(|value| value.is_some())
+                    .count() as u16
+        }) + 5
     };
     let movers_height = if movers.is_empty() { 0 } else { movers.len() as u16 + 3 };
 
@@ -230,6 +236,25 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
             ]));
         }
         if let Some(failure) = &tx.failure {
+            for (label, value) in [
+                ("account", failure.account.as_ref()),
+                ("expected", failure.expected.as_ref()),
+                ("actual", failure.actual.as_ref()),
+                ("source", failure.source.as_ref()),
+            ] {
+                let Some(value) = value else { continue };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("   {label:<9}"), muted()),
+                    Span::styled(
+                        value.clone(),
+                        match label {
+                            "expected" => Style::new().fg(OK),
+                            "actual" => Style::new().fg(BAD),
+                            _ => Style::new().fg(Color::Rgb(176, 180, 210)),
+                        },
+                    ),
+                ]));
+            }
             lines.extend(failure.checks.iter().map(|check| {
                 Line::from(vec![
                     Span::styled("   → ", Style::new().fg(ACCENT)),

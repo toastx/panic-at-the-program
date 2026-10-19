@@ -313,6 +313,37 @@ mod tests {
         }})
     }
 
+    fn constraint_fixture() -> serde_json::Value {
+        json!({"result": {
+            "slot": 1u64,
+            "meta": {
+                "err": {"InstructionError": [0, {"Custom": 2006}]},
+                "fee": 5000u64,
+                "computeUnitsConsumed": 4000u64,
+                "preBalances": [10u64],
+                "postBalances": [10u64],
+                "innerInstructions": [],
+                "logMessages": [
+                    "Program Vau1t11111111111111111111111111111111111 invoke [1]",
+                    "Program log: Instruction: Withdraw",
+                    "Program log: AnchorError thrown in programs/vault/src/lib.rs:88. Error Code: ConstraintSeeds. Error Number: 2006. Error Message: A seeds constraint was violated.",
+                    "Program log: AnchorError caused by account: vault. Error Code: ConstraintSeeds. Error Number: 2006. Error Message: A seeds constraint was violated.",
+                    "Program log: Left:",
+                    "Program log: 3sPq1aBxGv2kkR7ZLczdKJ2w7xkGk4trQJcM3pQWvNnT",
+                    "Program log: Right:",
+                    "Program log: 7xKX9mPaRvQw1bNcTzWd4rYfG6hJ8uL2sE5vA3dC9kFq",
+                    "Program Vau1t11111111111111111111111111111111111 consumed 4000 of 200000 compute units",
+                    "Program Vau1t11111111111111111111111111111111111 failed: custom program error: 0x7d6"
+                ]
+            },
+            "transaction": {"message": {
+                "header": {"numRequiredSignatures": 1, "numReadonlySignedAccounts": 0, "numReadonlyUnsignedAccounts": 0},
+                "accountKeys": ["Auth1111", "Vau1t111"],
+                "instructions": [{"programIdIndex": 0, "accounts": [0, 1], "data": ""}]
+            }}
+        }})
+    }
+
     fn account_fixture() -> serde_json::Value {
         let mut data = vec![0u8; 82];
         data[0..4].copy_from_slice(&1u32.to_le_bytes());
@@ -770,7 +801,7 @@ mod tests {
 
         let anchor = json!({"InstructionError": [5, {"Custom": 6001}]});
         let nodes = solana::parse("s", "devnet", &fixture()).nodes;
-        let failure = diagnose::failure(&anchor, &nodes, 1000, 200_000).unwrap();
+        let failure = diagnose::failure(&anchor, &nodes, &[], 1000, 200_000).unwrap();
         assert_eq!(failure.code, Code::Custom(6001));
         assert_eq!(failure.instruction, Some(5));
         assert!(failure.headline.contains("Anchor user error #1"));
@@ -778,25 +809,80 @@ mod tests {
         assert!(failure.checks.iter().any(|c| c.contains("error enum")));
 
         let seeds = json!({"InstructionError": [0, {"Custom": 2006}]});
-        let failure = diagnose::failure(&seeds, &nodes, 1000, 200_000).unwrap();
+        let failure = diagnose::failure(&seeds, &nodes, &[], 1000, 200_000).unwrap();
         assert!(failure.headline.contains("ConstraintSeeds"));
         assert!(failure.meaning.contains("derived PDA"));
         assert!(failure.checks.iter().any(|c| c.contains("re-derive the PDA")));
 
         let signature = json!({"InstructionError": [0, "MissingRequiredSignature"]});
-        let failure = diagnose::failure(&signature, &nodes, 1000, 200_000).unwrap();
+        let failure = diagnose::failure(&signature, &nodes, &[], 1000, 200_000).unwrap();
         assert_eq!(failure.code, Code::Named("MissingRequiredSignature".into()));
         assert!(failure.meaning.contains("must sign"));
         assert!(failure.checks.iter().any(|c| c.contains("no signature from")));
 
-        assert!(diagnose::failure(&Value::Null, &nodes, 0, 0).is_none());
+        assert!(diagnose::failure(&Value::Null, &nodes, &[], 0, 0).is_none());
+    }
+
+    #[test]
+    fn anchor_logs_yield_account_source_and_expected_values() {
+        let logs: Vec<String> = [
+            "Program Vau1t11111111111111111111111111111111111 invoke [1]",
+            "Program log: Instruction: Withdraw",
+            "Program log: AnchorError caused by account: vault. Error Code: ConstraintSeeds. Error Number: 2006. Error Message: A seeds constraint was violated.",
+            "Program log: Left:",
+            "Program log: 3sPq1aBxGv2kkR7ZLczdKJ2w7xkGk4trQJcM3pQWvNnT",
+            "Program log: Right:",
+            "Program log: 7xKX9mPaRvQw1bNcTzWd4rYfG6hJ8uL2sE5vA3dC9kFq",
+            "Program Vau1t11111111111111111111111111111111111 failed: custom program error: 0x7d6",
+        ]
+        .map(String::from)
+        .to_vec();
+
+        let parsed = diagnose::anchor_log(&logs);
+        assert_eq!(parsed.account.as_deref(), Some("vault"));
+        assert_eq!(parsed.name.as_deref(), Some("ConstraintSeeds"));
+        assert_eq!(parsed.number, Some(2006));
+        assert_eq!(parsed.message.as_deref(), Some("A seeds constraint was violated"));
+        assert_eq!(parsed.actual.as_deref(), Some("3sPq1aBxGv2kkR7ZLczdKJ2w7xkGk4trQJcM3pQWvNnT"));
+        assert_eq!(parsed.expected.as_deref(), Some("7xKX9mPaRvQw1bNcTzWd4rYfG6hJ8uL2sE5vA3dC9kFq"));
+
+        let thrown = ["Program log: AnchorError thrown in programs/vault/src/lib.rs:88. Error Code: Unauthorized. Error Number: 6000. Error Message: not the owner."]
+            .map(String::from)
+            .to_vec();
+        let parsed = diagnose::anchor_log(&thrown);
+        assert_eq!(parsed.source.as_deref(), Some("programs/vault/src/lib.rs:88"));
+        assert_eq!(parsed.name.as_deref(), Some("Unauthorized"));
+        assert_eq!(parsed.number, Some(6000));
+    }
+
+    #[test]
+    fn a_constraint_failure_renders_expected_against_actual() {
+        let mut app = App::new("devnet".into());
+        app.tx = Some(solana::parse("4vK9mP", "devnet", &constraint_fixture()));
+        app.kind = solana::Kind::Tx;
+        app.goto(Screen::Overview);
+
+        let failure = app.tx().unwrap().failure.as_ref().unwrap();
+        assert!(failure.headline.contains("ConstraintSeeds"));
+        assert_eq!(failure.account.as_deref(), Some("vault"));
+        assert_eq!(failure.source.as_deref(), Some("programs/vault/src/lib.rs:88"));
+
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("account"));
+        assert!(screen.contains("vault"));
+        assert!(screen.contains("expected"));
+        assert!(screen.contains("7xKX9mPaRvQw1bNcTzWd4rYfG6hJ8uL2sE5vA3dC9kFq"));
+        assert!(screen.contains("actual"));
+        assert!(screen.contains("3sPq1aBxGv2kkR7ZLczdKJ2w7xkGk4trQJcM3pQWvNnT"));
+        assert!(screen.contains("programs/vault/src/lib.rs:88"));
+        assert!(screen.contains("failed the constraint"));
     }
 
     #[test]
     fn token_program_errors_use_the_token_table() {
         let nodes = solana::parse("s", "devnet", &fixture()).nodes;
         let failure =
-            diagnose::failure(&json!({"InstructionError": [0, {"Custom": 1}]}), &nodes, 0, 0).unwrap();
+            diagnose::failure(&json!({"InstructionError": [0, {"Custom": 1}]}), &nodes, &[], 0, 0).unwrap();
         assert!(failure.headline.contains("InsufficientFunds"));
         assert!(failure.headline.contains("Token program"));
         assert!(failure.meaning.contains("not hold enough tokens"));

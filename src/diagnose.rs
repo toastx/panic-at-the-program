@@ -15,10 +15,64 @@ pub struct Failure {
     pub code: Code,
     pub headline: String,
     pub meaning: String,
+    pub account: Option<String>,
+    pub source: Option<String>,
+    pub expected: Option<String>,
+    pub actual: Option<String>,
     pub checks: Vec<String>,
 }
 
-pub fn failure(err: &Value, nodes: &[Node], cu: u32, cu_limit: u32) -> Option<Failure> {
+#[derive(Default)]
+pub struct AnchorLog {
+    pub name: Option<String>,
+    pub number: Option<u32>,
+    pub message: Option<String>,
+    pub account: Option<String>,
+    pub source: Option<String>,
+    pub expected: Option<String>,
+    pub actual: Option<String>,
+}
+
+fn field(line: &str, key: &str) -> Option<String> {
+    let value = &line[line.find(key)? + key.len()..];
+    let end = value.find(". ").unwrap_or(value.len());
+    Some(value[..end].trim().trim_end_matches('.').to_string())
+}
+
+pub fn anchor_log(logs: &[String]) -> AnchorLog {
+    let mut parsed = AnchorLog::default();
+    let mut lines = logs.iter().filter_map(|line| line.strip_prefix("Program log: ")).peekable();
+
+    while let Some(line) = lines.next() {
+        if let Some(rest) = line.strip_prefix("AnchorError ") {
+            let head = rest.split("Error Code: ").next().unwrap_or_default();
+            if let Some(account) = head.strip_prefix("caused by account: ") {
+                parsed.account = Some(account.trim().trim_end_matches('.').to_string());
+            }
+            if let Some(source) = head.strip_prefix("thrown in ") {
+                parsed.source = Some(source.trim().trim_end_matches('.').to_string());
+            }
+            parsed.name = field(rest, "Error Code: ").or(parsed.name);
+            parsed.number = field(rest, "Error Number: ").and_then(|v| v.parse().ok()).or(parsed.number);
+            parsed.message = field(rest, "Error Message: ").or(parsed.message);
+            continue;
+        }
+        if line.starts_with("Left:") {
+            parsed.actual = lines.peek().map(|next| next.trim().to_string());
+            continue;
+        }
+        if line.starts_with("Right:") {
+            parsed.expected = lines.peek().map(|next| next.trim().to_string());
+            continue;
+        }
+        if let Some(message) = line.strip_prefix("Error: ") {
+            parsed.message.get_or_insert_with(|| message.trim().to_string());
+        }
+    }
+    parsed
+}
+
+pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: u32) -> Option<Failure> {
     if err.is_null() {
         return None;
     }
@@ -31,7 +85,20 @@ pub fn failure(err: &Value, nodes: &[Node], cu: u32, cu_limit: u32) -> Option<Fa
         .rposition(|n| n.status == Status::Failed)
         .or_else(|| instruction.and_then(|index| top_level(nodes).get(index).copied()));
     let program = node.map(|i| nodes[i].program.as_str()).unwrap_or_default();
-    let (headline, meaning) = describe(&code, program);
+    let (mut headline, mut meaning) = describe(&code, program);
+
+    let anchor = node
+        .and_then(|i| logs.get(nodes[i].logs.clone()))
+        .map(anchor_log)
+        .unwrap_or_default();
+    if let (Some(name), Some(number)) = (&anchor.name, anchor.number) {
+        headline = format!("{name} — error {number} (0x{number:x})");
+    }
+    if let Some(message) = &anchor.message {
+        if !message.is_empty() {
+            meaning = message.clone();
+        }
+    }
 
     let mut checks = Vec::new();
     if let (Code::Named(name), Some(node)) = (&code, node) {
@@ -64,7 +131,27 @@ pub fn failure(err: &Value, nodes: &[Node], cu: u32, cu_limit: u32) -> Option<Fa
         }
     }
 
-    Some(Failure { instruction, node, code, headline, meaning, checks })
+    if let (Some(expected), Some(actual)) = (&anchor.expected, &anchor.actual) {
+        if expected != actual {
+            checks.push("the value the program expected differs from the one passed".to_string());
+        }
+    }
+    if let Some(account) = &anchor.account {
+        checks.insert(0, format!("account `{account}` failed the constraint"));
+    }
+
+    Some(Failure {
+        instruction,
+        node,
+        code,
+        headline,
+        meaning,
+        account: anchor.account,
+        source: anchor.source,
+        expected: anchor.expected,
+        actual: anchor.actual,
+        checks,
+    })
 }
 
 fn top_level(nodes: &[Node]) -> Vec<usize> {
