@@ -569,6 +569,24 @@ pub fn accounts_info(cluster: &str, addresses: &[String]) -> Result<Vec<Value>, 
         .unwrap_or_default())
 }
 
+pub fn accounts_info_sparse(cluster: &str, addresses: &[String]) -> Result<Vec<Option<Value>>, Box<dyn Error>> {
+    let value = rpc(cluster, "getMultipleAccounts", json!([addresses, {"encoding": "base64"}]))?;
+    Ok(value
+        .pointer("/result/value")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .map(|v| if v.is_null() { None } else { Some(v.clone()) })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+pub fn minimum_balance(cluster: &str, size: usize) -> Result<u64, Box<dyn Error>> {
+    let value = rpc(cluster, "getMinimumBalanceForRentExemption", json!([size]))?;
+    value["result"].as_u64().ok_or_else(|| "no result".into())
+}
+
 pub fn store_value(cluster: &str, key: &str, value: &Value) -> io::Result<()> {
     store(cluster, key, value)
 }

@@ -4,6 +4,7 @@ mod idl;
 mod workspace;
 mod screens;
 mod solana;
+mod validate;
 mod ui;
 
 use std::io;
@@ -821,6 +822,83 @@ mod tests {
         assert!(failure.checks.iter().any(|c| c.contains("no signature from")));
 
         assert!(diagnose::failure(&Value::Null, &nodes, &[], 0, 0).is_none());
+    }
+
+    #[test]
+    fn validation_flags_signer_writable_address_and_pda_mismatches() {
+        use validate::Level;
+
+        let tx = solana::parse("4vK9mP", "devnet", &constraint_fixture());
+        let node = &tx.nodes[0];
+        let specs = json!([
+            {"name": "authority", "signer": true, "writable": true},
+            {"name": "vault", "writable": true, "pda": {"seeds": [
+                {"kind": "const", "value": [118, 97, 117, 108, 116]},
+                {"kind": "account", "path": "authority"}
+            ]}}
+        ]);
+
+        let findings = validate::declared_findings(specs.as_array().unwrap(), node);
+        let pda = findings
+            .iter()
+            .find(|f| f.message.contains("PDA"))
+            .expect("the vault PDA mismatch is caught");
+        assert_eq!(pda.index, 1);
+        assert_eq!(pda.role, "vault");
+        assert_eq!(pda.level, Level::Error);
+        assert_eq!(pda.actual.as_deref(), Some("Vau1t111"));
+        assert!(pda.expected.as_deref().is_some_and(|key| key.len() > 32));
+
+        let partial = json!([{"name": "authority", "signer": true, "writable": true}]);
+        assert!(
+            validate::declared_findings(partial.as_array().unwrap(), node).is_empty(),
+            "optional accounts shift indices, so mismatched counts are not checked positionally"
+        );
+
+        let fixed = json!([{"name": "authority"}, {"name": "token_program", "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}]);
+        let findings = validate::declared_findings(fixed.as_array().unwrap(), node);
+        let address = findings.iter().find(|f| f.message.contains("address")).unwrap();
+        assert_eq!(address.expected.as_deref(), Some("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"));
+        assert_eq!(address.actual.as_deref(), Some("Vau1t111"));
+    }
+
+    #[test]
+    fn validation_flags_token_and_rent_problems_from_account_state() {
+        use std::collections::HashMap;
+
+        let tx = solana::parse("4vK9mP", "devnet", &constraint_fixture());
+        let node = &tx.nodes[0];
+        let mut data = vec![0u8; 165];
+        data[0..32].copy_from_slice(&solana::bs58_decode("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"));
+        data[32..64].copy_from_slice(&solana::bs58_decode("BdHB1RVLPXjs1yvH1Nt1rMW4nNzBjSuRtsvBh5zm8BBA"));
+
+        let mut state = HashMap::new();
+        state.insert(
+            "Vau1t111".to_string(),
+            validate::State { owner: validate::TOKEN.to_string(), lamports: 100, data },
+        );
+
+        let roles = vec!["mint".to_string(), "associated_token".to_string()];
+        let findings = validate::state_findings(node, &roles, &state, |_| Some(2_039_280));
+        let ata = findings
+            .iter()
+            .find(|f| f.message.contains("associated token account"))
+            .expect("a role named associated_* must be the canonical ATA");
+        assert_eq!(ata.level, validate::Level::Error);
+        assert!(ata.expected.as_deref().is_some_and(|key| key.len() > 32));
+
+        let quiet = validate::state_findings(node, &[], &state, |_| Some(2_039_280));
+        assert!(
+            quiet.iter().all(|f| f.message.contains("rent-exempt")),
+            "an undeclared token account is not second-guessed"
+        );
+        let rent = findings.iter().find(|f| f.message.contains("rent-exempt")).unwrap();
+        assert_eq!(rent.level, validate::Level::Warn);
+        assert_eq!(rent.expected.as_deref(), Some("0.002039280 SOL"));
+        assert_eq!(rent.actual.as_deref(), Some("0.000000100 SOL"));
+
+        let empty: HashMap<String, validate::State> = HashMap::new();
+        assert!(validate::state_findings(node, &[], &empty, |_| None).is_empty());
     }
 
     #[test]

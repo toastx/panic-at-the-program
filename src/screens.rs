@@ -470,6 +470,7 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
     ];
     let decoded = crate::idl::idl(&tx.cluster, &node.program)
         .and_then(|idl| crate::idl::instruction(&idl, &crate::solana::bs58_decode(&node.data)));
+    let findings = crate::validate::check(&tx.cluster, tx, index);
     if let Some(decoded) = &decoded {
         facts.push(Line::from(vec![
             Span::styled("Data        ", muted()),
@@ -529,6 +530,37 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
         f.render_widget(Paragraph::new(lines), rows[2]);
     }
 
+    if !findings.is_empty() {
+        let lines: Vec<Line> = findings
+            .iter()
+            .take(rows[3].height.saturating_sub(1) as usize)
+            .map(|finding| {
+                let (glyph, color) = match finding.level {
+                    crate::validate::Level::Error => ("✕", BAD),
+                    crate::validate::Level::Warn => ("⚠", Color::Rgb(234, 179, 8)),
+                };
+                let mut spans = vec![
+                    Span::styled(format!("{glyph} "), Style::new().fg(color)),
+                    Span::styled(
+                        format!("{:<20.19} ", if finding.role.is_empty() { short(&finding.key) } else { finding.role.clone() }),
+                        Style::new().fg(Color::Rgb(96, 165, 250)),
+                    ),
+                    Span::styled(finding.message.clone(), Style::new().fg(Color::Rgb(176, 180, 210))),
+                ];
+                if let (Some(expected), Some(actual)) = (&finding.expected, &finding.actual) {
+                    spans.push(Span::styled(format!("  expected {}", short(expected)), Style::new().fg(OK)));
+                    spans.push(Span::styled(format!("  got {}", short(actual)), Style::new().fg(BAD)));
+                }
+                Line::from(spans)
+            })
+            .collect();
+        let block = panel("VALIDATION", false).padding(Padding::horizontal(1));
+        let inner = block.inner(rows[3]);
+        f.render_widget(block, rows[3]);
+        f.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
+
     let split = rows[3].width >= 96;
     let panes = if split {
         Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[3])
@@ -546,8 +578,14 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .enumerate()
         .map(|(i, account)| {
+            let flagged = findings.iter().find(|finding| finding.index == i);
+            let (glyph, glyph_style) = match flagged.map(|f| f.level) {
+                Some(crate::validate::Level::Error) => ("✕ ", Style::new().fg(BAD)),
+                Some(crate::validate::Level::Warn) => ("⚠ ", Style::new().fg(Color::Rgb(234, 179, 8))),
+                None => ("● ", Style::new().fg(if account.writable { ACCENT } else { MUTED })),
+            };
             ListItem::new(Line::from(vec![
-                Span::styled("● ", Style::new().fg(if account.writable { ACCENT } else { MUTED })),
+                Span::styled(glyph, glyph_style),
                 Span::styled(
                     format!("{:<24.23} ", roles.get(i).cloned().unwrap_or_default()),
                     Style::new().fg(Color::Rgb(96, 165, 250)),
