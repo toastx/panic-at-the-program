@@ -1,4 +1,5 @@
 mod app;
+mod diagnose;
 mod screens;
 mod solana;
 mod ui;
@@ -271,7 +272,7 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use solana::Status;
 
     fn transfer_fixture() -> serde_json::Value {
@@ -355,8 +356,9 @@ mod tests {
                 "innerInstructions": [{"index": 0, "instructions": [{"programIdIndex": 3, "accounts": [0, 2], "data": "3Bxs"}]}],
                 "logMessages": [
                     "Program Vau1t11111111111111111111111111111111111 invoke [1]",
-                    "Program log: withdraw",
+                    "Program log: Instruction: Withdraw",
                     "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [2]",
+                    "Program log: Instruction: TransferChecked",
                     "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA consumed 8420 of 200000 compute units",
                     "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA failed: custom program error: 0x1",
                     "Program Vau1t11111111111111111111111111111111111 consumed 12620 of 200000 compute units",
@@ -678,6 +680,53 @@ mod tests {
     }
 
     #[test]
+    fn instruction_errors_decode_into_a_diagnosis() {
+        use diagnose::Code;
+
+        let anchor = json!({"InstructionError": [5, {"Custom": 6001}]});
+        let nodes = solana::parse("s", "devnet", &fixture()).nodes;
+        let failure = diagnose::failure(&anchor, &nodes, 1000, 200_000).unwrap();
+        assert_eq!(failure.code, Code::Custom(6001));
+        assert_eq!(failure.instruction, Some(5));
+        assert!(failure.headline.contains("Anchor user error #1"));
+        assert!(failure.headline.contains("0x1771"));
+        assert!(failure.checks.iter().any(|c| c.contains("error enum")));
+
+        let seeds = json!({"InstructionError": [0, {"Custom": 2006}]});
+        let failure = diagnose::failure(&seeds, &nodes, 1000, 200_000).unwrap();
+        assert!(failure.headline.contains("ConstraintSeeds"));
+        assert!(failure.meaning.contains("derived PDA"));
+        assert!(failure.checks.iter().any(|c| c.contains("re-derive the PDA")));
+
+        let signature = json!({"InstructionError": [0, "MissingRequiredSignature"]});
+        let failure = diagnose::failure(&signature, &nodes, 1000, 200_000).unwrap();
+        assert_eq!(failure.code, Code::Named("MissingRequiredSignature".into()));
+        assert!(failure.meaning.contains("must sign"));
+        assert!(failure.checks.iter().any(|c| c.contains("no signature from")));
+
+        assert!(diagnose::failure(&Value::Null, &nodes, 0, 0).is_none());
+    }
+
+    #[test]
+    fn token_program_errors_use_the_token_table() {
+        let nodes = solana::parse("s", "devnet", &fixture()).nodes;
+        let failure =
+            diagnose::failure(&json!({"InstructionError": [0, {"Custom": 1}]}), &nodes, 0, 0).unwrap();
+        assert!(failure.headline.contains("InsufficientFunds"));
+        assert!(failure.headline.contains("Token program"));
+        assert!(failure.meaning.contains("not hold enough tokens"));
+    }
+
+    #[test]
+    fn instruction_names_come_from_program_logs() {
+        let tx = solana::parse("s", "devnet", &fixture());
+        assert_eq!(tx.nodes[0].name.as_deref(), Some("Withdraw"));
+        assert_eq!(tx.nodes[1].name.as_deref(), Some("TransferChecked"));
+        let screen = render(&mut loaded(), 120, 34);
+        assert!(screen.contains("Vau1…1111 · Withdraw"));
+    }
+
+    #[test]
     fn the_failure_path_is_marked_from_root_to_error() {
         let mut app = loaded();
         let tx = app.tx().unwrap();
@@ -771,7 +820,7 @@ mod tests {
         assert!(screen.contains("INSTRUCTION 1.1"));
         assert!(screen.contains("✕ failed"));
         assert!(screen.contains("Call path"));
-        assert!(screen.contains("Vau1…1111  →  Token Program"));
+        assert!(screen.contains("Vau1…1111 · Withdraw  →  Token Program · TransferChecked"));
         assert!(screen.contains("custom program error: 0x1"));
         assert!(screen.contains("LOGS"));
 
@@ -791,9 +840,9 @@ mod tests {
         assert!(screen.contains("PRE"));
         assert!(screen.contains("POST"));
         assert!(screen.contains("CHANGE"));
-        assert!(screen.contains("FAILURE PATH"));
-        assert!(screen.contains("↯ 1 Vau1…1111"));
-        assert!(screen.contains("✕ 1.1 Token Program"));
+        assert!(screen.contains("DIAGNOSIS"));
+        assert!(screen.contains("instruction 1.1"));
+        assert!(screen.contains("Vau1…1111 · Withdraw  →  Token Program · TransferChecked"));
         assert!(screen.contains("Transaction Failed"));
     }
 

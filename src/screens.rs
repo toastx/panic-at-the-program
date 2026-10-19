@@ -133,7 +133,11 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
             .total_cmp(&(a.after - a.before).abs())
     });
     movers.truncate(3);
-    let path_height = if path.is_empty() { 0 } else { path.len() as u16 + 2 };
+    let path_height = if path.is_empty() {
+        0
+    } else {
+        tx.failure.as_ref().map_or(0, |f| f.checks.len() as u16) + 5
+    };
     let movers_height = if movers.is_empty() { 0 } else { movers.len() as u16 + 3 };
 
     let rows = Layout::vertical([
@@ -153,9 +157,12 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
         Status::Ok => "Transaction Succeeded".to_string(),
         Status::Failed => "Transaction Failed".to_string(),
     };
-    let detail = match (&tx.error, tx.failed_node.and_then(|i| tx.nodes.get(i))) {
-        (Some(error), Some(node)) => format!("Instruction {} · {} · {}", node.path, node.label, error),
-        (Some(error), None) => error.clone(),
+    let detail = match (&tx.failure, &tx.error, tx.failed_node.and_then(|i| tx.nodes.get(i))) {
+        (Some(failure), _, Some(node)) => {
+            format!("Instruction {} · {} · {}", node.path, node_label(node), failure.headline)
+        }
+        (_, Some(error), Some(node)) => format!("Instruction {} · {} · {}", node.path, node_label(node), error),
+        (_, Some(error), None) => error.clone(),
         _ => format!("{} instructions executed", tx.nodes.iter().filter(|n| n.depth == 0).count()),
     };
     f.render_widget(
@@ -197,32 +204,39 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     if path_height > 0 {
-        let block = panel("FAILURE PATH", false).border_style(Style::new().fg(Color::Rgb(128, 72, 78)));
+        let block = panel("DIAGNOSIS", false)
+            .border_style(Style::new().fg(BAD))
+            .padding(Padding::horizontal(1));
         let inner = block.inner(rows[2]);
         f.render_widget(block, rows[2]);
-        let lines: Vec<Line> = path
-            .iter()
-            .enumerate()
-            .map(|(step, &i)| {
-                let node = &tx.nodes[i];
-                let last = step + 1 == path.len();
-                let mut spans = vec![
-                    Span::styled(format!("{}{} ", "  ".repeat(step), if last { "✕" } else { "↯" }), Style::new().fg(BAD)),
-                    Span::styled(format!("{} ", node.path), muted()),
-                    Span::styled(
-                        node.label.clone(),
-                        if last { Style::new().fg(BAD).bold() } else { Style::new().fg(Color::Rgb(233, 164, 170)) },
-                    ),
-                    Span::styled(format!("  {} CU", thousands(node.self_cu as u64)), muted()),
-                ];
-                if last {
-                    if let Some(error) = &node.error {
-                        spans.push(Span::styled(format!("  ⚠ {error}"), Style::new().fg(BAD).bold()));
-                    }
-                }
-                Line::from(spans)
-            })
-            .collect();
+
+        let mut lines = Vec::new();
+        if let Some(failure) = &tx.failure {
+            lines.push(Line::from(vec![
+                Span::styled("✕  ", Style::new().fg(BAD).bold()),
+                Span::styled(failure.headline.clone(), Style::new().fg(BAD).bold()),
+            ]));
+            if !failure.meaning.is_empty() {
+                lines.push(Line::styled(format!("   {}", failure.meaning), muted()));
+            }
+        }
+        if let Some(&failed) = path.last() {
+            let node = &tx.nodes[failed];
+            lines.push(Line::from(vec![
+                Span::styled("   instruction ", muted()),
+                Span::styled(node.path.clone(), Style::new().fg(Color::White).bold()),
+                Span::styled("  ", muted()),
+                Span::styled(call_path(tx, failed).join("  →  "), Style::new().fg(Color::Rgb(233, 164, 170))),
+            ]));
+        }
+        if let Some(failure) = &tx.failure {
+            lines.extend(failure.checks.iter().map(|check| {
+                Line::from(vec![
+                    Span::styled("   → ", Style::new().fg(ACCENT)),
+                    Span::styled(check.clone(), Style::new().fg(Color::Rgb(176, 180, 210))),
+                ])
+            }));
+        }
         f.render_widget(Paragraph::new(lines), inner);
     }
 
@@ -314,7 +328,7 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
                 Span::styled(marker, muted()),
                 Span::styled(glyph, Style::new().fg(glyph_color)),
                 Span::raw(" "),
-                Span::styled(node.label.clone(), label_style),
+                Span::styled(node_label(node), label_style),
             ];
             if collapsed && node.children > 0 {
                 spans.push(Span::styled(format!(" (+{})", node.children), muted()));
@@ -382,7 +396,11 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let error_height = if failed { 3 } else { 0 };
+    let error_height = if failed {
+        3 + tx.failure.as_ref().filter(|f| f.node == Some(index)).map_or(0, |f| f.checks.len() as u16)
+    } else {
+        0
+    };
     let rows = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(5),
@@ -393,7 +411,7 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(node.label.clone(), Style::new().fg(Color::White).bold()),
+            Span::styled(node_label(node), Style::new().fg(Color::White).bold()),
             Span::styled(format!("   {} inner call(s)   depth {}", node.children, node.depth), muted()),
             Span::raw("   "),
             chip(if failed { "✕ failed" } else { "✓ ok" }, status_color(node.status)),
@@ -443,17 +461,30 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(Paragraph::new(facts), rows[1]);
 
     if failed {
-        let error = node.error.clone().or_else(|| tx.error.clone()).unwrap_or_default();
-        f.render_widget(
-            Paragraph::new(vec![
+        let diagnosed = tx
+            .failure
+            .as_ref()
+            .filter(|failure| failure.node == Some(index));
+        let headline = match diagnosed {
+            Some(failure) => failure.headline.clone(),
+            None => node.error.clone().or_else(|| tx.error.clone()).unwrap_or_default(),
+        };
+        let mut lines = vec![Line::from(vec![
+            Span::styled("⚠  ", Style::new().fg(BAD).bold()),
+            Span::styled(headline, Style::new().fg(BAD).bold()),
+        ])];
+        if let Some(failure) = diagnosed {
+            if !failure.meaning.is_empty() {
+                lines.push(Line::styled(format!("   {}", failure.meaning), muted()));
+            }
+            lines.extend(failure.checks.iter().map(|check| {
                 Line::from(vec![
-                    Span::styled("⚠  ", Style::new().fg(BAD).bold()),
-                    Span::styled(error, Style::new().fg(BAD).bold()),
-                ]),
-                Line::raw(""),
-            ]),
-            rows[2],
-        );
+                    Span::styled("   → ", Style::new().fg(ACCENT)),
+                    Span::styled(check.clone(), Style::new().fg(Color::Rgb(176, 180, 210))),
+                ])
+            }));
+        }
+        f.render_widget(Paragraph::new(lines), rows[2]);
     }
 
     let split = rows[3].width >= 96;
@@ -615,7 +646,7 @@ fn flow(f: &mut Frame, area: Rect, app: &mut App) {
 
         let amount = format!("{:.6} {}", transfer.amount, transfer.unit);
         draw_box(f, left, &short(&transfer.from), &format!("-{amount}"), accent, text, BAD);
-        draw_box(f, middle, &node.label, &format!("{}  ix {}", transfer.kind, node.path), accent, text, accent);
+        draw_box(f, middle, &node_label(node), &format!("{}  ix {}", transfer.kind, node.path), accent, text, accent);
         if right.x + right.width <= inner.x + inner.width {
             draw_box(f, right, &short(&transfer.to), &format!("+{amount}"), accent, text, OK);
         }
@@ -708,7 +739,7 @@ fn call_path(tx: &crate::solana::Tx, index: usize) -> Vec<String> {
         }
     }
     chain.reverse();
-    chain.into_iter().map(|i| tx.nodes[i].label.clone()).collect()
+    chain.into_iter().map(|i| node_label(&tx.nodes[i])).collect()
 }
 
 fn detail_panel(f: &mut Frame, area: Rect, app: &App) {

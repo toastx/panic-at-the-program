@@ -296,6 +296,13 @@ pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
+pub fn node_label(node: &Node) -> String {
+    match &node.name {
+        Some(name) => format!("{} · {name}", node.label),
+        None => node.label.clone(),
+    }
+}
+
 pub fn render_compute_chart(f: &mut Frame, area: Rect, tx: &Tx, selected: usize, focused: bool) {
     let block = panel("COMPUTE UNITS BY INSTRUCTION (SELF COST)", focused);
     let inner = block.inner(area);

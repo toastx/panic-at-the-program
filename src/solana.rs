@@ -39,6 +39,7 @@ pub struct Node {
     pub error: Option<String>,
     pub accounts: Vec<Account>,
     pub data: String,
+    pub name: Option<String>,
     pub children: usize,
     pub logs: std::ops::Range<usize>,
 }
@@ -52,6 +53,7 @@ pub struct Tx {
     pub status: Status,
     pub error: Option<String>,
     pub failed_node: Option<usize>,
+    pub failure: Option<crate::diagnose::Failure>,
     pub slot: u64,
     pub nodes: Vec<Node>,
     pub accounts: Vec<Account>,
@@ -391,6 +393,12 @@ pub fn parse(signature: &str, cluster: &str, value: &Value) -> Tx {
 
     for (line_index, line) in logs.iter().enumerate() {
         let Some(rest) = line.strip_prefix("Program ") else { continue };
+        if let Some(name) = rest.strip_prefix("log: Instruction: ") {
+            if let Some(&index) = stack.last() {
+                nodes[index].name.get_or_insert_with(|| name.trim().to_string());
+            }
+            continue;
+        }
         if rest.starts_with("log:") || rest.starts_with("data:") || rest.starts_with("return:") {
             continue;
         }
@@ -432,6 +440,7 @@ pub fn parse(signature: &str, cluster: &str, value: &Value) -> Tx {
                     .as_ref()
                     .map(|ix| instruction_accounts(ix, &keys))
                     .unwrap_or_default(),
+                name: None,
                 data: instruction
                     .as_ref()
                     .and_then(|ix| ix["data"].as_str().map(str::to_string))
@@ -499,16 +508,22 @@ pub fn parse(signature: &str, cluster: &str, value: &Value) -> Tx {
                 .or_else(|| Some(result["meta"]["err"].to_string()))
         });
 
+    let cu = result["meta"]["computeUnitsConsumed"].as_u64().unwrap_or(0) as u32;
+    let cu_limit = if cu_limit == 0 { 200_000 } else { cu_limit };
+    let failure = crate::diagnose::failure(&result["meta"]["err"], &nodes, cu, cu_limit);
+    let failed_node = failed_node.or_else(|| failure.as_ref().and_then(|f| f.node));
+
     Tx {
         signature: signature.to_string(),
         cluster: cluster.to_string(),
-        cu: result["meta"]["computeUnitsConsumed"].as_u64().unwrap_or(0) as u32,
-        cu_limit: if cu_limit == 0 { 200_000 } else { cu_limit },
+        cu,
+        cu_limit,
         fee: result["meta"]["fee"].as_u64().unwrap_or(0),
         slot: result["slot"].as_u64().unwrap_or(0),
         status: if error.is_some() { Status::Failed } else { Status::Ok },
         error,
         failed_node,
+        failure,
         balances: balance_changes(result, &keys),
         accounts: keys,
         logs,
