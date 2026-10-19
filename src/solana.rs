@@ -181,6 +181,21 @@ pub fn fetch(cluster: &str, signature: &str) -> Result<Value, Box<dyn Error>> {
 }
 
 impl Tx {
+    pub fn log_frames(&self) -> Vec<Option<usize>> {
+        let mut frames = vec![None; self.logs.len()];
+        for (index, node) in self.nodes.iter().enumerate() {
+            for line in node.logs.clone() {
+                let deeper = frames[line]
+                    .map(|current: usize| self.nodes[current].depth < node.depth)
+                    .unwrap_or(true);
+                if deeper {
+                    frames[line] = Some(index);
+                }
+            }
+        }
+        frames
+    }
+
     pub fn failure_path(&self) -> Vec<usize> {
         let Some(failed) = self.failed_node else { return Vec::new() };
         let mut path = vec![failed];

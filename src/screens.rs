@@ -1017,20 +1017,33 @@ fn state_diff(f: &mut Frame, area: Rect, app: &mut App) {
 fn logs(f: &mut Frame, area: Rect, app: &mut App) {
     let rows = app.log_rows();
     let Some((tx, inner)) = require_tx(f, area, app, "PROGRAM LOGS") else { return };
+    let frames = tx.log_frames();
     let items: Vec<ListItem> = rows
         .iter()
-        .map(|&i| &tx.logs[i])
-        .map(|line| {
+        .map(|&i| {
+            let frame = frames.get(i).copied().flatten();
+            let node = frame.map(|index| &tx.nodes[index]);
+            let depth = node.map_or(0, |node| node.depth + 1);
+            let failed = node.is_some_and(|node| node.status == Status::Failed);
+            let line = &tx.logs[i];
+
             let style = if line.contains("failed") {
                 Style::new().fg(BAD)
-            } else if line.contains("invoke") {
-                Style::new().fg(ACCENT)
-            } else if line.contains("success") {
-                Style::new().fg(OK)
+            } else if line.starts_with("Program log:") {
+                Style::new().fg(Color::Rgb(176, 180, 210))
+            } else if failed {
+                Style::new().fg(Color::Rgb(233, 164, 170))
             } else {
                 muted()
             };
-            ListItem::new(Line::styled(line.clone(), style))
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{:<7}", node.map(|node| node.path.clone()).unwrap_or_default()),
+                    muted(),
+                ),
+                Span::styled("│ ".repeat(depth), Style::new().fg(if failed { Color::Rgb(128, 72, 78) } else { PANEL })),
+                Span::styled(compact_keys(line), style),
+            ]))
         })
         .collect();
     clickable_rows(app, inner, items.len());

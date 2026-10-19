@@ -957,6 +957,25 @@ mod tests {
     }
 
     #[test]
+    fn logs_nest_under_the_invocation_that_emitted_them() {
+        let tx = solana::parse("4vK9mP", "devnet", &fixture());
+        let frames = tx.log_frames();
+        let depth_of = |needle: &str| {
+            let index = tx.logs.iter().position(|line| line.contains(needle)).unwrap();
+            frames[index].map(|node| tx.nodes[node].depth)
+        };
+
+        assert_eq!(depth_of("Instruction: Withdraw"), Some(0));
+        assert_eq!(depth_of("Instruction: TransferChecked"), Some(1));
+        assert_eq!(depth_of("consumed 8420"), Some(1), "inner frame owns its own meter line");
+
+        let mut app = loaded();
+        app.goto(Screen::Logs);
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("1.1"), "log rows carry the frame path");
+    }
+
+    #[test]
     fn workspace_config_parses_sections_and_labels() {
         let parsed = workspace::parse(
             r#"
