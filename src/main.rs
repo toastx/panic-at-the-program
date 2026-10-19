@@ -957,6 +957,56 @@ mod tests {
     }
 
     #[test]
+    fn heuristics_suggest_a_fix_per_failure_class() {
+        let nodes = solana::parse("s", "devnet", &fixture()).nodes;
+        let fix = |err: Value, logs: Vec<String>, cu, limit| {
+            diagnose::failure(&err, &nodes, &logs, cu, limit)
+                .map(|f| f.checks.join(" | "))
+                .unwrap_or_default()
+        };
+
+        let blockhash = fix(json!("BlockhashNotFound"), vec![], 0, 0);
+        assert!(blockhash.contains("fetch a fresh one and re-sign"));
+
+        let compute = fix(
+            json!({"InstructionError": [0, "ProgramFailedToComplete"]}),
+            vec!["Program Vau1t11111111111111111111111111111111111 consumed 200000 of 200000 compute units".into(),
+                 "Program failed to complete: exceeded CUs meter at BPF instruction".into()],
+            200_000,
+            200_000,
+        );
+        assert!(compute.contains("ran out of compute: 200000 of 200000"));
+        assert!(compute.contains("SetComputeUnitLimit"));
+
+        let rent = fix(
+            json!({"InstructionError": [0, {"Custom": 0}]}),
+            vec!["Program log: Transfer: insufficient lamports 890880, need 2039280".into()],
+            0,
+            0,
+        );
+        assert!(rent.contains("0.001148400 more SOL"), "shows the exact shortfall: {rent}");
+
+        let in_use = fix(
+            json!({"InstructionError": [0, {"Custom": 0}]}),
+            vec!["Program log: Allocate: account Vau1t111 already in use".into()],
+            0,
+            0,
+        );
+        assert!(in_use.contains("init_if_needed"));
+
+        let discriminator = fix(json!({"InstructionError": [0, {"Custom": 101}]}), vec![], 0, 0);
+        assert!(discriminator.contains("does not recognise this instruction"));
+
+        let panic = fix(
+            json!({"InstructionError": [0, "ProgramFailedToComplete"]}),
+            vec!["Program log: panicked at 'attempt to subtract with overflow'".into()],
+            0,
+            0,
+        );
+        assert!(panic.contains("check unwraps and arithmetic"));
+    }
+
+    #[test]
     fn token_program_errors_use_the_token_table() {
         let nodes = solana::parse("s", "devnet", &fixture()).nodes;
         let failure =

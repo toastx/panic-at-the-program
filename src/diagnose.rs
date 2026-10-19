@@ -87,10 +87,8 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
     let program = node.map(|i| nodes[i].program.as_str()).unwrap_or_default();
     let (mut headline, mut meaning) = describe(&code, program);
 
-    let anchor = node
-        .and_then(|i| logs.get(nodes[i].logs.clone()))
-        .map(anchor_log)
-        .unwrap_or_default();
+    let logs_slice = node.and_then(|i| logs.get(nodes[i].logs.clone())).unwrap_or(logs);
+    let anchor = anchor_log(logs_slice);
     if let (Some(name), Some(number)) = (&anchor.name, anchor.number) {
         headline = format!("{name} — error {number} (0x{number:x})");
     }
@@ -131,6 +129,8 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
         }
     }
 
+    checks.extend(rules(&code, &headline, logs_slice, cu, cu_limit));
+
     if let (Some(expected), Some(actual)) = (&anchor.expected, &anchor.actual) {
         if expected != actual {
             checks.push("the value the program expected differs from the one passed".to_string());
@@ -152,6 +152,70 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
         actual: anchor.actual,
         checks,
     })
+}
+
+fn rules(code: &Code, headline: &str, logs: &[String], cu: u32, cu_limit: u32) -> Vec<String> {
+    let mut out = Vec::new();
+    let text = logs.join("\n");
+
+    if let Code::Named(name) = code {
+        match name.as_str() {
+            "BlockhashNotFound" => out.push(
+                "the blockhash expired before the transaction landed — fetch a fresh one and re-sign".to_string(),
+            ),
+            "AlreadyProcessed" => out.push(
+                "this transaction already landed — reuse the earlier signature instead of resending".to_string(),
+            ),
+            "InsufficientFundsForFee" => {
+                out.push("the fee payer cannot cover the fee — fund it before retrying".to_string())
+            }
+            _ => {}
+        }
+    }
+
+    if text.contains("exceeded CUs")
+        || text.contains("exceeded maximum number of instructions")
+        || matches!(code, Code::Named(name) if name == "ComputeBudgetExceeded")
+    {
+        out.push(format!(
+            "ran out of compute: {cu} of {cu_limit} units used — raise it with ComputeBudget::SetComputeUnitLimit"
+        ));
+    }
+
+    if let Some(line) = logs.iter().find(|line| line.contains("insufficient lamports")) {
+        let numbers: Vec<u64> = line
+            .split(|c: char| !c.is_ascii_digit())
+            .filter_map(|part| part.parse().ok())
+            .collect();
+        match numbers.as_slice() {
+            [have, need, ..] if need > have => out.push(format!(
+                "fund the account with {:.9} more SOL to reach the rent-exempt minimum",
+                (need - have) as f64 / 1e9
+            )),
+            _ => out.push("an account is below the rent-exempt minimum — fund it first".to_string()),
+        }
+    }
+
+    if text.contains("already in use") {
+        out.push("the account already exists — change the seed, or use init_if_needed".to_string());
+    }
+
+    if headline.contains("Slippage") || text.contains("slippage") {
+        out.push("the quote moved before the transaction landed — widen the tolerance or requote".to_string());
+    }
+
+    if matches!(code, Code::Custom(100 | 101 | 102)) {
+        out.push(
+            "the deployed program does not recognise this instruction — redeploy, or regenerate the client from the deployed IDL"
+                .to_string(),
+        );
+    }
+
+    if text.contains("access violation") || text.contains("panicked at") {
+        out.push("the program panicked — check unwraps and arithmetic in that instruction".to_string());
+    }
+
+    out
 }
 
 fn top_level(nodes: &[Node]) -> Vec<usize> {
