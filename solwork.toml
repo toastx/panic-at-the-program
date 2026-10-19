@@ -1,0 +1,8 @@
+idl_dir = "target/idl"
+
+[idl]
+
+[programs]
+JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 = "Jupiter"
+
+[accounts]

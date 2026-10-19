@@ -957,6 +957,31 @@ mod tests {
     }
 
     #[test]
+    fn workspace_config_parses_sections_and_labels() {
+        let parsed = workspace::parse(
+            r#"
+            # a comment
+            idl_dir = "idls"
+
+            [idl]
+            Vau1t11111111111111111111111111111111111 = "idls/vault.json"
+
+            [programs]
+            Vau1t11111111111111111111111111111111111 = "Vault"   # trailing comment
+
+            [accounts]
+            Auth1111 = "treasury"
+            "#,
+        );
+
+        assert_eq!(parsed[""]["idl_dir"], "idls");
+        assert_eq!(parsed["idl"]["Vau1t11111111111111111111111111111111111"], "idls/vault.json");
+        assert_eq!(parsed["programs"]["Vau1t11111111111111111111111111111111111"], "Vault");
+        assert_eq!(parsed["accounts"]["Auth1111"], "treasury");
+        assert!(workspace::parse("").is_empty());
+    }
+
+    #[test]
     fn heuristics_suggest_a_fix_per_failure_class() {
         let nodes = solana::parse("s", "devnet", &fixture()).nodes;
         let fix = |err: Value, logs: Vec<String>, cu, limit| {

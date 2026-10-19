@@ -363,8 +363,14 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
                 Style::new().fg(if node.self_cu > 0 { Color::Rgb(96, 165, 250) } else { MUTED }),
             ));
             if is_failure {
-                if let Some(error) = &node.error {
-                    spans.push(Span::styled(format!("  ⚠ {error}"), Style::new().fg(BAD).bold()));
+                let message = tx
+                    .failure
+                    .as_ref()
+                    .filter(|failure| failure.node == Some(i))
+                    .map(|failure| failure.headline.clone())
+                    .or_else(|| node.error.clone());
+                if let Some(message) = message {
+                    spans.push(Span::styled(format!("  ⚠ {message}"), Style::new().fg(BAD).bold()));
                 }
             } else if on_path {
                 spans.push(Span::styled("  propagated", Style::new().fg(Color::Rgb(128, 72, 78))));

@@ -230,6 +230,9 @@ fn urlencode(input: &str) -> String {
 }
 
 fn program_name(id: &str) -> String {
+    if let Some(label) = crate::workspace::label("programs", id) {
+        return label;
+    }
     match id {
         "11111111111111111111111111111111" => "System Program",
         "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" => "Token Program",

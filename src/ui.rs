@@ -32,6 +32,9 @@ pub fn chip(text: &str, color: Color) -> Span<'static> {
 }
 
 pub fn short(key: &str) -> String {
+    if let Some(label) = crate::workspace::label("accounts", key) {
+        return label;
+    }
     if key.len() > 12 {
         format!("{}…{}", &key[..4], &key[key.len() - 4..])
     } else {
