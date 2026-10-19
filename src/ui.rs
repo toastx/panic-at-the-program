@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::{App, CLUSTERS, Click, Sidebar};
+use crate::app::{App, CLUSTERS, Click};
 use crate::solana::{Kind, Node, Status, Tx};
 
 pub const ACCENT: Color = Color::Rgb(139, 122, 255);
@@ -208,13 +208,6 @@ pub fn render_cluster_menu(f: &mut Frame, app: &mut App) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
-    match app.sidebar {
-        Sidebar::Entities => render_entities(f, area, app),
-        Sidebar::Screens => render_screens(f, area, app),
-    }
-}
-
 fn nav_help(f: &mut Frame, area: Rect, keys: &[(&str, &str)]) {
     f.render_widget(
         Paragraph::new(
@@ -231,7 +224,7 @@ fn nav_help(f: &mut Frame, area: Rect, keys: &[(&str, &str)]) {
     );
 }
 
-fn render_entities(f: &mut Frame, area: Rect, app: &mut App) {
+pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
     let block = panel("HISTORY", app.focus_nav);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -298,60 +291,7 @@ fn render_entities(f: &mut Frame, area: Rect, app: &mut App) {
         nav_help(
             f,
             rows[1],
-            &[("Enter", "open"), ("o", "load"), ("c", "cluster"), ("?", "help")],
-        );
-    }
-}
-
-fn render_screens(f: &mut Frame, area: Rect, app: &mut App) {
-    let title = match app.loaded_key() {
-        Some(key) => short(&key),
-        None => "—".to_string(),
-    };
-    let block = panel(&title, app.focus_nav);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let help_height = if inner.height >= 14 { 5 } else { 0 };
-    let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(1), Constraint::Length(help_height)])
-        .split(inner);
-
-    let back = Rect { x: rows[0].x, y: rows[0].y, width: rows[0].width, height: 1 };
-    f.render_widget(
-        Paragraph::new(Line::styled("← History", Style::new().fg(ACCENT))),
-        back,
-    );
-    app.push_hit(back, Click::Back);
-
-    let screens = app.screens();
-    let items: Vec<ListItem> = screens
-        .iter()
-        .map(|screen| ListItem::new(Line::raw(format!("  {}", screen.title()))))
-        .collect();
-
-    for (i, screen) in screens.iter().enumerate() {
-        let y = rows[1].y + i as u16;
-        if y < rows[1].y + rows[1].height {
-            app.push_hit(Rect { x: rows[1].x, y, width: rows[1].width, height: 1 }, Click::Workspace(*screen));
-        }
-    }
-
-    let mut state = ListState::default().with_selected(Some(app.screen_index()));
-    f.render_stateful_widget(
-        List::new(items).highlight_style(if app.focus_nav {
-            Style::new().fg(ACCENT).bg(Color::Rgb(38, 38, 58)).bold()
-        } else {
-            Style::new().fg(ACCENT).bold()
-        }),
-        rows[1],
-        &mut state,
-    );
-
-    if help_height > 0 {
-        nav_help(
-            f,
-            rows[2],
-            &[("Enter", "inspect"), ("Esc", "history"), ("x", "explorer"), ("?", "help")],
+            &[("Enter", "open"), ("Tab", "panel"), ("o", "load"), ("[ ]", "network"), ("?", "help")],
         );
     }
 }

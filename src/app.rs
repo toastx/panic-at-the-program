@@ -28,7 +28,9 @@ pub struct Hit {
 pub enum Screen {
     Overview,
     Execution,
+    Invocation,
     Accounts,
+    Flow,
     StateDiff,
     Logs,
     Info,
@@ -37,10 +39,11 @@ pub enum Screen {
 }
 
 impl Screen {
-    pub const TX: [Screen; 6] = [
+    pub const TX: [Screen; 7] = [
         Screen::Overview,
         Screen::Execution,
         Screen::Accounts,
+        Screen::Flow,
         Screen::StateDiff,
         Screen::Logs,
         Screen::Raw,
@@ -51,7 +54,9 @@ impl Screen {
         match self {
             Screen::Overview => "Overview",
             Screen::Execution => "Execution",
+            Screen::Invocation => "Instruction",
             Screen::Accounts => "Accounts",
+            Screen::Flow => "Value Flow",
             Screen::StateDiff => "State Diff",
             Screen::Logs => "Logs",
             Screen::Info => "Info",
@@ -66,12 +71,13 @@ impl Screen {
             Kind::Account => &Screen::ACCOUNT,
         }
     }
-}
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Sidebar {
-    Entities,
-    Screens,
+    pub fn hub(kind: Kind) -> Screen {
+        match kind {
+            Kind::Tx => Screen::Overview,
+            Kind::Account => Screen::Info,
+        }
+    }
 }
 
 pub enum Mode {
@@ -94,7 +100,8 @@ pub struct App {
     pub kind: Kind,
     pub entries: Vec<Entry>,
     pub entry_index: usize,
-    pub sidebar: Sidebar,
+    pub node_index: Option<usize>,
+    pub section_columns: usize,
     pub stack: Vec<Location>,
     pub focus_nav: bool,
     pub list: ListState,
@@ -121,10 +128,11 @@ impl App {
             screen: Screen::Overview,
             kind: Kind::Tx,
             entry_index: 0,
-            sidebar: Sidebar::Entities,
+            node_index: None,
+            section_columns: 3,
             stack: Vec::new(),
             focus_nav: false,
-            list: ListState::default().with_selected(Some(0)),
+            list: ListState::default(),
             collapsed: HashSet::new(),
             mode: Mode::Normal,
             search: String::new(),
@@ -160,7 +168,7 @@ impl App {
         self.load_account(pubkey);
     }
 
-    pub fn back(&mut self) -> bool {
+    fn pop_location(&mut self) -> bool {
         let Some(location) = self.stack.pop() else { return false };
         let in_memory = match location.kind {
             Kind::Tx => self.tx().is_some_and(|tx| tx.signature == location.key),
@@ -168,7 +176,6 @@ impl App {
         };
         if in_memory {
             self.kind = location.kind;
-            self.sidebar = Sidebar::Screens;
             self.message.clear();
         } else {
             match location.kind {
@@ -198,8 +205,10 @@ impl App {
                 self.tx = Some(solana::parse(signature, &self.cluster, &value));
                 self.collapsed.clear();
                 self.kind = Kind::Tx;
-                self.sidebar = Sidebar::Screens;
+                self.focus_nav = false;
+                self.node_index = self.tx().and_then(|tx| tx.failed_node);
                 self.goto(Screen::Overview);
+                self.focus_failure();
                 self.refresh_history();
                 self.message.clear();
             }
@@ -212,7 +221,7 @@ impl App {
             Ok(value) => {
                 self.account = Some(solana::parse_account(pubkey, &value));
                 self.kind = Kind::Account;
-                self.sidebar = Sidebar::Screens;
+                self.focus_nav = false;
                 self.goto(Screen::Info);
                 self.refresh_history();
                 self.message.clear();
@@ -235,6 +244,12 @@ impl App {
             Kind::Tx => self.tx().map(|tx| tx.signature.clone()),
             Kind::Account => self.account.as_ref().map(|a| a.key.clone()),
         }
+    }
+
+    pub fn step_cluster(&mut self, delta: isize) {
+        let current = CLUSTERS.iter().position(|c| *c == self.cluster).unwrap_or(0) as isize;
+        let next = (current + delta).rem_euclid(CLUSTERS.len() as isize) as usize;
+        self.set_cluster(CLUSTERS[next]);
     }
 
     pub fn toggle_cluster_menu(&mut self) {
@@ -307,6 +322,9 @@ impl App {
             Some(Click::Row(index)) => {
                 self.focus_nav = false;
                 self.list.select(Some(index));
+                if self.screen == Screen::hub(self.kind) {
+                    self.open_section();
+                }
             }
             Some(Click::Entry(index)) => {
                 self.entry_index = index;
@@ -322,13 +340,113 @@ impl App {
     }
 
     pub fn goto(&mut self, screen: Screen) {
+        let keep_node = screen == Screen::Execution && self.screen == Screen::Invocation;
         self.screen = screen;
-        self.list.select(Some(0));
+        if !keep_node {
+            self.list.select(None);
+        }
         self.scroll = 0;
     }
 
+    pub fn back(&mut self) -> bool {
+        let hub = Screen::hub(self.kind);
+        if self.screen == Screen::Invocation {
+            self.goto(Screen::Execution);
+            return true;
+        }
+        if self.screen != hub {
+            self.goto(hub);
+            return true;
+        }
+        self.pop_location()
+    }
+
+    pub fn sections(&self) -> Vec<(Screen, String, String)> {
+        let hub = Screen::hub(self.kind);
+        self.screens()
+            .iter()
+            .filter(|screen| **screen != hub)
+            .map(|screen| {
+                let (headline, detail) = self.section_summary(*screen);
+                (*screen, headline, detail)
+            })
+            .collect()
+    }
+
+    fn section_summary(&self, screen: Screen) -> (String, String) {
+        if self.kind == Kind::Account {
+            let Some(account) = self.account.as_ref() else { return (String::new(), String::new()) };
+            return match screen {
+                Screen::Data => (
+                    format!("{} B", account.data.len()),
+                    match solana::decode_account(account) {
+                        Some((layout, fields)) => format!("{layout}, {} fields", fields.len()),
+                        None => "no decoder".to_string(),
+                    },
+                ),
+                Screen::Raw => ("JSON".to_string(), "cached response".to_string()),
+                _ => (String::new(), String::new()),
+            };
+        }
+        let Some(tx) = self.tx() else { return (String::new(), String::new()) };
+        match screen {
+            Screen::Execution => (
+                format!("{} calls", tx.nodes.len()),
+                match tx.failed_node.map(|i| tx.nodes[i].path.clone()) {
+                    Some(path) => format!("failed at {path}"),
+                    None => format!("{} top level", tx.nodes.iter().filter(|n| n.depth == 0).count()),
+                },
+            ),
+            Screen::Accounts => (
+                format!("{}", tx.accounts.len()),
+                format!(
+                    "{} writable · {} signer",
+                    tx.accounts.iter().filter(|a| a.writable).count(),
+                    tx.accounts.iter().filter(|a| a.signer).count()
+                ),
+            ),
+            Screen::Flow => {
+                let transfers = solana::transfers(tx);
+                match transfers.first() {
+                    Some(first) => (
+                        format!("{} transfers", transfers.len()),
+                        format!("{} {}", first.kind, first.unit),
+                    ),
+                    None => ("none".to_string(), "no decodable transfers".to_string()),
+                }
+            }
+            Screen::StateDiff => {
+                let net: f64 = tx
+                    .balances
+                    .iter()
+                    .filter(|b| b.label == "SOL")
+                    .map(|b| b.after - b.before)
+                    .sum();
+                (
+                    format!("{} changes", tx.balances.len()),
+                    format!("net {net:+.6} SOL"),
+                )
+            }
+            Screen::Logs => (
+                format!("{} lines", tx.logs.len()),
+                format!(
+                    "{} program invocations",
+                    tx.logs.iter().filter(|l| l.contains(" invoke [")).count()
+                ),
+            ),
+            Screen::Raw => ("JSON".to_string(), "cached response".to_string()),
+            _ => (String::new(), String::new()),
+        }
+    }
+
+    pub fn open_section(&mut self) {
+        let sections = self.sections();
+        if let Some(screen) = sections.get(self.selected_row()).map(|(screen, _, _)| *screen) {
+            self.goto(screen);
+        }
+    }
+
     pub fn back_to_entities(&mut self) {
-        self.sidebar = Sidebar::Entities;
         self.focus_nav = true;
         self.stack.clear();
     }
@@ -338,7 +456,11 @@ impl App {
     }
 
     pub fn screen_index(&self) -> usize {
-        self.screens().iter().position(|s| *s == self.screen).unwrap_or(0)
+        let screen = match self.screen {
+            Screen::Invocation => Screen::Execution,
+            other => other,
+        };
+        self.screens().iter().position(|s| *s == screen).unwrap_or(0)
     }
 
     pub fn cycle_screen(&mut self, delta: isize) {
@@ -355,6 +477,42 @@ impl App {
             Kind::Tx => self.open_transaction(&key),
             Kind::Account => self.open_account(&key),
         }
+    }
+
+    pub fn parent_node(&self, index: usize) -> Option<usize> {
+        let tx = self.tx()?;
+        let depth = tx.nodes.get(index)?.depth;
+        (0..index).rev().find(|&i| tx.nodes[i].depth < depth)
+    }
+
+    pub fn default_row(&self) -> usize {
+        match (self.screen, self.tx()) {
+            (Screen::Execution, Some(tx)) => tx
+                .failed_node
+                .and_then(|failed| self.visible_nodes().iter().position(|&i| i == failed))
+                .unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    pub fn selected_row(&self) -> usize {
+        self.list.selected().unwrap_or_else(|| self.default_row())
+    }
+
+    pub fn focus_failure(&mut self) {
+        let Some(tx) = self.tx() else { return };
+        let Some(failed) = tx.failed_node else { return };
+        for ancestor in tx.failure_path() {
+            self.collapsed.remove(&ancestor);
+        }
+        if self.screen == Screen::Execution {
+            let row = self.visible_nodes().iter().position(|&i| i == failed);
+            self.list.select(row);
+        }
+    }
+
+    pub fn failure_path(&self) -> Vec<usize> {
+        self.tx().map(Tx::failure_path).unwrap_or_default()
     }
 
     pub fn visible_nodes(&self) -> Vec<usize> {
@@ -375,27 +533,35 @@ impl App {
     }
 
     pub fn selected_account(&self) -> Option<String> {
-        let row = self.list.selected()?;
+        let row = self.selected_row();
         match self.screen {
             Screen::Accounts => {
                 let index = *self.account_rows().get(row)?;
                 self.tx().map(|tx| tx.accounts[index].key.clone())
             }
-            Screen::StateDiff => {
-                let index = *self.balance_rows().get(row)?;
-                self.tx().map(|tx| tx.balances[index].key.clone())
-            }
-            Screen::Execution | Screen::Overview => {
-                let node = self.selected_node()?;
-                self.tx().map(|tx| tx.nodes[node].program.clone())
+            Screen::Invocation => {
+                let node = self.node_index?;
+                let tx = self.tx()?;
+                tx.nodes[node].accounts.get(row).map(|a| a.key.clone())
             }
             _ => None,
         }
     }
 
+    pub fn selected_transfer_node(&self) -> Option<usize> {
+        let transfers = solana::transfers(self.tx()?);
+        transfers.get(self.selected_row()).map(|t| t.node)
+    }
+
+    pub fn inspect_invocation(&mut self) {
+        let Some(node) = self.selected_node() else { return };
+        self.node_index = Some(node);
+        self.goto(Screen::Invocation);
+    }
+
     pub fn selected_node(&self) -> Option<usize> {
         let visible = self.visible_nodes();
-        visible.get(self.list.selected().unwrap_or(0).min(visible.len().saturating_sub(1))).copied()
+        visible.get(self.selected_row().min(visible.len().saturating_sub(1))).copied()
     }
 
     pub fn tx(&self) -> Option<&Tx> {
@@ -447,11 +613,17 @@ impl App {
 
     pub fn rows(&self) -> usize {
         match self.screen {
-            Screen::Execution | Screen::Overview => self.visible_nodes().len(),
+            Screen::Overview | Screen::Info => self.sections().len(),
+            Screen::Execution => self.visible_nodes().len(),
+            Screen::Flow => self.tx().map(solana::transfers).unwrap_or_default().len(),
+            Screen::Invocation => self
+                .node_index
+                .and_then(|i| self.tx().map(|tx| tx.nodes[i].accounts.len()))
+                .unwrap_or(0),
             Screen::Accounts => self.account_rows().len(),
             Screen::StateDiff => self.balance_rows().len(),
             Screen::Logs => self.log_rows().len(),
-            Screen::Raw | Screen::Info | Screen::Data => 0,
+            Screen::Raw | Screen::Data => 0,
         }
     }
 
@@ -469,7 +641,7 @@ impl App {
             return;
         }
         let visible = self.visible_nodes();
-        let start = self.list.selected().unwrap_or(0);
+        let start = self.selected_row();
         let hit = (1..=visible.len())
             .map(|offset| (start + offset) % visible.len().max(1))
             .find(|&i| visible.get(i).is_some_and(|&n| self.node_matches(n)));

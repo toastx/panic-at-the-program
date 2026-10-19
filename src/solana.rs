@@ -40,6 +40,7 @@ pub struct Node {
     pub accounts: Vec<Account>,
     pub data: String,
     pub children: usize,
+    pub logs: std::ops::Range<usize>,
 }
 
 pub struct Tx {
@@ -174,6 +175,25 @@ pub fn fetch(cluster: &str, signature: &str) -> Result<Value, Box<dyn Error>> {
     }
     store(cluster, signature, &value)?;
     Ok(value)
+}
+
+impl Tx {
+    pub fn failure_path(&self) -> Vec<usize> {
+        let Some(failed) = self.failed_node else { return Vec::new() };
+        let mut path = vec![failed];
+        let mut depth = self.nodes[failed].depth;
+        for i in (0..failed).rev() {
+            if self.nodes[i].depth < depth {
+                path.push(i);
+                depth = self.nodes[i].depth;
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+        path.reverse();
+        path
+    }
 }
 
 pub fn cluster_url(name: &str) -> String {
@@ -369,7 +389,7 @@ pub fn parse(signature: &str, cluster: &str, value: &Value) -> Tx {
         .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
         .unwrap_or_default();
 
-    for line in &logs {
+    for (line_index, line) in logs.iter().enumerate() {
         let Some(rest) = line.strip_prefix("Program ") else { continue };
         if rest.starts_with("log:") || rest.starts_with("data:") || rest.starts_with("return:") {
             continue;
@@ -417,6 +437,7 @@ pub fn parse(signature: &str, cluster: &str, value: &Value) -> Tx {
                     .and_then(|ix| ix["data"].as_str().map(str::to_string))
                     .unwrap_or_default(),
                 children: 0,
+                logs: line_index..line_index + 1,
             });
             continue;
         }
@@ -433,11 +454,14 @@ pub fn parse(signature: &str, cluster: &str, value: &Value) -> Tx {
             continue;
         }
         if rest.ends_with(" success") {
-            stack.pop();
+            if let Some(idx) = stack.pop() {
+                nodes[idx].logs.end = line_index + 1;
+            }
         } else if let Some((_, message)) = rest.split_once(" failed: ") {
             if let Some(idx) = stack.pop() {
                 nodes[idx].status = Status::Failed;
                 nodes[idx].error = Some(message.to_string());
+                nodes[idx].logs.end = line_index + 1;
             }
         }
     }
@@ -741,4 +765,59 @@ pub fn hex_dump(data: &[u8], offset: usize, rows: usize) -> Vec<(String, String,
             (format!("{:08x}", (offset + row) * 16), hex, ascii)
         })
         .collect()
+}
+
+pub struct Transfer {
+    pub node: usize,
+    pub kind: String,
+    pub from: String,
+    pub to: String,
+    pub amount: f64,
+    pub unit: String,
+}
+
+pub fn transfers(tx: &Tx) -> Vec<Transfer> {
+    let mut out = Vec::new();
+    for (node, instruction) in tx.nodes.iter().enumerate() {
+        let bytes = bs58_decode(&instruction.data);
+        let account = |i: usize| instruction.accounts.get(i).map(|a| a.key.clone()).unwrap_or_default();
+        match instruction.program.as_str() {
+            "11111111111111111111111111111111" if bytes.len() >= 12 => {
+                if u32::from_le_bytes(bytes[0..4].try_into().unwrap_or([0; 4])) != 2 {
+                    continue;
+                }
+                out.push(Transfer {
+                    node,
+                    kind: "System::Transfer".to_string(),
+                    from: account(0),
+                    to: account(1),
+                    amount: u64_at(&bytes, 4) as f64 / 1e9,
+                    unit: "SOL".to_string(),
+                });
+            }
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" | "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" => {
+                let Some(tag) = bytes.first().copied() else { continue };
+                let raw = u64_at(&bytes, 1) as f64;
+                let (kind, from, to, amount, unit) = match tag {
+                    3 => ("Token::Transfer", account(0), account(1), raw, "tokens".to_string()),
+                    12 => {
+                        let decimals = bytes.get(9).copied().unwrap_or(0) as i32;
+                        (
+                            "Token::TransferChecked",
+                            account(0),
+                            account(2),
+                            raw / 10f64.powi(decimals),
+                            crate::ui::short(&account(1)),
+                        )
+                    }
+                    7 => ("Token::MintTo", account(0), account(1), raw, "tokens".to_string()),
+                    8 => ("Token::Burn", account(0), account(1), raw, "tokens".to_string()),
+                    _ => continue,
+                };
+                out.push(Transfer { node, kind: kind.to_string(), from, to, amount, unit });
+            }
+            _ => {}
+        }
+    }
+    out
 }

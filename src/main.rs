@@ -13,7 +13,7 @@ use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::prelude::*;
 
-use app::{App, CLUSTERS, Mode, Screen, Sidebar};
+use app::{App, CLUSTERS, Mode, Screen};
 #[cfg(test)]
 use app::Click;
 
@@ -60,13 +60,41 @@ fn move_selection(app: &mut App, delta: isize) {
     if rows == 0 {
         return;
     }
-    let current = app.list.selected().unwrap_or(0) as isize;
+    let current = app.selected_row() as isize;
     app.list.select(Some(current.saturating_add(delta).clamp(0, rows as isize - 1) as usize));
+}
+
+fn grid_step(app: &App) -> isize {
+    if app.screen == Screen::hub(app.kind) {
+        app.section_columns.max(1) as isize
+    } else {
+        1
+    }
+}
+
+fn step_back(app: &mut App) {
+    if app.back() {
+        return;
+    }
+    if !app.focus_nav {
+        app.focus_nav = true;
+    } else {
+        app.back_to_entities();
+    }
 }
 
 fn toggle_collapse(app: &mut App, collapse: bool) -> bool {
     let Some(index) = app.selected_node() else { return false };
     let has_children = app.tx().is_some_and(|tx| tx.nodes[index].children > 0);
+
+    if collapse && (!has_children || app.collapsed.contains(&index)) {
+        let Some(parent) = app.parent_node(index) else { return false };
+        app.collapsed.insert(parent);
+        if let Some(row) = app.visible_nodes().iter().position(|&i| i == parent) {
+            app.list.select(Some(row));
+        }
+        return true;
+    }
     if !has_children {
         return false;
     }
@@ -149,37 +177,35 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('n') => app.jump_to_match(),
         KeyCode::Esc => {
+            let dismissed = !app.search.is_empty() || !app.message.is_empty();
             app.mode = Mode::Normal;
             app.search.clear();
             app.message.clear();
-            if !app.focus_nav {
-                app.focus_nav = true;
-            } else if !app.back() {
-                app.back_to_entities();
+            if !dismissed {
+                step_back(app);
             }
         }
-        KeyCode::Tab => {
-            if app.sidebar == Sidebar::Screens {
-                app.cycle_screen(1);
-            } else {
-                app.focus_nav = !app.focus_nav;
-            }
-        }
+        KeyCode::Tab => app.focus_nav = !app.focus_nav,
         KeyCode::BackTab => app.cycle_screen(-1),
         KeyCode::Char('x') => app.open_in_explorer(),
         KeyCode::Char('c') => app.toggle_cluster_menu(),
-        KeyCode::Down | KeyCode::Char('j') => match (app.focus_nav, app.sidebar) {
-            (true, Sidebar::Entities) => {
+        KeyCode::Char(']') => app.step_cluster(1),
+        KeyCode::Char('[') => app.step_cluster(-1),
+        KeyCode::Backspace | KeyCode::Char('b') => step_back(app),
+        KeyCode::Down | KeyCode::Char('j') => {
+            if app.focus_nav {
                 app.entry_index = (app.entry_index + 1).min(app.entries.len().saturating_sub(1));
+            } else {
+                move_selection(app, grid_step(app));
             }
-            (true, Sidebar::Screens) => app.cycle_screen(1),
-            _ => move_selection(app, 1),
-        },
-        KeyCode::Up | KeyCode::Char('k') => match (app.focus_nav, app.sidebar) {
-            (true, Sidebar::Entities) => app.entry_index = app.entry_index.saturating_sub(1),
-            (true, Sidebar::Screens) => app.cycle_screen(-1),
-            _ => move_selection(app, -1),
-        },
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.focus_nav {
+                app.entry_index = app.entry_index.saturating_sub(1);
+            } else {
+                move_selection(app, -grid_step(app));
+            }
+        }
         KeyCode::PageDown => move_selection(app, 10),
         KeyCode::PageUp => move_selection(app, -10),
         KeyCode::Char('g') => move_selection(app, isize::MIN / 2),
@@ -187,23 +213,40 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
         KeyCode::Right | KeyCode::Char('l') => {
             if app.focus_nav {
                 app.focus_nav = false;
+            } else if app.screen == Screen::hub(app.kind) {
+                move_selection(app, 1);
             } else {
                 toggle_collapse(app, false);
             }
         }
         KeyCode::Left | KeyCode::Char('h') => {
-            if !app.focus_nav && !toggle_collapse(app, true) {
+            if app.focus_nav {
+            } else if app.screen == Screen::hub(app.kind) {
+                move_selection(app, -1);
+            } else if !toggle_collapse(app, true) {
                 app.focus_nav = true;
             }
         }
-        KeyCode::Enter => match (app.focus_nav, app.sidebar) {
-            (true, Sidebar::Entities) => app.open_entry(app.entry_index),
-            (true, Sidebar::Screens) => app.focus_nav = false,
-            _ => {
-                if let Some(key) = app.selected_account() {
-                    app.drill_into_account(&key);
-                }
+        KeyCode::Enter => match (app.focus_nav, app.screen) {
+            (true, _) => app.open_entry(app.entry_index),
+            (_, Screen::Overview | Screen::Info) => {
+                app.open_section();
+                app.focus_nav = false;
             }
+            _ => match app.screen {
+                Screen::Execution => app.inspect_invocation(),
+                Screen::Flow => {
+                    if let Some(node) = app.selected_transfer_node() {
+                        app.node_index = Some(node);
+                        app.goto(Screen::Invocation);
+                    }
+                }
+                _ => {
+                    if let Some(key) = app.selected_account() {
+                        app.drill_into_account(&key);
+                    }
+                }
+            },
         },
         KeyCode::Char('r') => {
             if app.kind == solana::Kind::Account {
@@ -230,6 +273,42 @@ mod tests {
     use ratatui::backend::TestBackend;
     use serde_json::json;
     use solana::Status;
+
+    fn transfer_fixture() -> serde_json::Value {
+        let mut system = vec![2u8, 0, 0, 0];
+        system.extend_from_slice(&1_500_000_000u64.to_le_bytes());
+        let mut token = vec![12u8];
+        token.extend_from_slice(&2_500_000u64.to_le_bytes());
+        token.push(6);
+        let system_data = solana::bs58_encode(&system);
+        let token_data = solana::bs58_encode(&token);
+        json!({"result": {
+            "slot": 1u64,
+            "meta": {
+                "err": null,
+                "fee": 5000u64,
+                "computeUnitsConsumed": 4000u64,
+                "preBalances": [10_000_000_000u64, 0u64],
+                "postBalances": [8_500_000_000u64, 1_500_000_000u64],
+                "innerInstructions": [],
+                "logMessages": [
+                    "Program 11111111111111111111111111111111 invoke [1]",
+                    "Program 11111111111111111111111111111111 success",
+                    "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [1]",
+                    "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA consumed 4000 of 200000 compute units",
+                    "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA success"
+                ]
+            },
+            "transaction": {"message": {
+                "header": {"numRequiredSignatures": 1, "numReadonlySignedAccounts": 0, "numReadonlyUnsignedAccounts": 1},
+                "accountKeys": ["Payer1111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "Dest2222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "Mint3333cccccccccccccccccccccccccccccc", "ToknAcct4444dddddddddddddddddddddddddd"],
+                "instructions": [
+                    {"programIdIndex": 0, "accounts": [0, 1], "data": system_data},
+                    {"programIdIndex": 0, "accounts": [3, 2, 1], "data": token_data}
+                ]
+            }}
+        }})
+    }
 
     fn account_fixture() -> serde_json::Value {
         let mut data = vec![0u8; 82];
@@ -296,7 +375,6 @@ mod tests {
         let mut app = App::new("devnet".into());
         app.tx = Some(solana::parse("4vK9mP", "devnet", &fixture()));
         app.kind = solana::Kind::Tx;
-        app.sidebar = Sidebar::Screens;
         app.cluster = "devnet".into();
         app.goto(Screen::Execution);
         app.focus_nav = false;
@@ -347,9 +425,13 @@ mod tests {
     fn collapsing_hides_nested_calls() {
         let mut app = loaded();
         assert_eq!(app.visible_nodes().len(), 2);
+        assert_eq!(app.selected_node(), Some(1), "selection starts on the failure");
+
         on_key(&mut app, KeyEvent::from(KeyCode::Left));
-        assert_eq!(app.visible_nodes().len(), 1);
+        assert_eq!(app.visible_nodes().len(), 1, "left from a leaf collapses its parent");
+        assert_eq!(app.selected_node(), Some(0));
         assert!(render(&mut app, 120, 34).contains("(+1)"));
+
         on_key(&mut app, KeyEvent::from(KeyCode::Right));
         assert_eq!(app.visible_nodes().len(), 2);
     }
@@ -357,10 +439,9 @@ mod tests {
     #[test]
     fn navigation_switches_workspaces_and_modes() {
         let mut app = loaded();
-        on_key(&mut app, KeyEvent::from(KeyCode::Tab));
-        on_key(&mut app, KeyEvent::from(KeyCode::Tab));
+        app.goto(Screen::StateDiff);
         assert!(render(&mut app, 120, 34).contains("STATE DIFF"));
-        on_key(&mut app, KeyEvent::from(KeyCode::Tab));
+        app.goto(Screen::Logs);
         assert!(render(&mut app, 120, 34).contains("PROGRAM LOGS"));
         on_key(&mut app, KeyEvent::from(KeyCode::Char('o')));
         on_key(&mut app, KeyEvent::from(KeyCode::Char('7')));
@@ -384,7 +465,6 @@ mod tests {
     #[test]
     fn detail_panel_shows_selected_instruction() {
         let mut app = loaded();
-        on_key(&mut app, KeyEvent::from(KeyCode::Down));
         let screen = render(&mut app, 120, 34);
         assert!(screen.contains("SELECTED INSTRUCTION"));
         assert!(screen.contains("8,420 self"));
@@ -454,6 +534,68 @@ mod tests {
     }
 
     #[test]
+    fn instruction_is_a_drill_in_screen_not_a_section() {
+        let mut app = loaded();
+        app.goto(Screen::Overview);
+        let screen = render(&mut app, 120, 34);
+        assert!(
+            !app.sections().iter().any(|(screen, _, _)| *screen == Screen::Invocation),
+            "the drill-in view is not a listed section"
+        );
+        assert!(screen.contains("┌ Execution"));
+
+        app.goto(Screen::Execution);
+        app.inspect_invocation();
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("INSTRUCTION"));
+
+        on_key(&mut app, KeyEvent::from(KeyCode::Char('b')));
+        assert!(matches!(app.screen, Screen::Execution));
+        on_key(&mut app, KeyEvent::from(KeyCode::Char('b')));
+        assert!(matches!(app.screen, Screen::Overview));
+    }
+
+    #[test]
+    fn value_flow_derives_transfers_and_links_to_instructions() {
+        let mut app = App::new("devnet".into());
+        app.tx = Some(solana::parse("4vK9mP", "devnet", &transfer_fixture()));
+        app.kind = solana::Kind::Tx;
+        app.goto(Screen::Flow);
+
+        let transfers = solana::transfers(app.tx().unwrap());
+        assert_eq!(transfers.len(), 2);
+        assert_eq!(transfers[0].kind, "System::Transfer");
+        assert!((transfers[0].amount - 1.5).abs() < 1e-9);
+        assert_eq!(transfers[1].kind, "Token::TransferChecked");
+        assert!((transfers[1].amount - 2.5).abs() < 1e-9);
+
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("VALUE FLOW"));
+        assert!(screen.contains("▶"));
+        assert!(screen.contains("-1.500000 SOL"));
+        assert!(screen.contains("System::Transfer"));
+        assert!(screen.contains("+2.500000"));
+
+        on_key(&mut app, KeyEvent::from(KeyCode::Down));
+        on_key(&mut app, KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(app.screen, Screen::Invocation));
+        assert_eq!(app.node_index, Some(1));
+    }
+
+    #[test]
+    fn networks_switch_from_the_keyboard() {
+        let mut app = loaded();
+        app.tx = None;
+        on_key(&mut app, KeyEvent::from(KeyCode::Char(']')));
+        assert_eq!(app.cluster, "testnet");
+        on_key(&mut app, KeyEvent::from(KeyCode::Char(']')));
+        assert_eq!(app.cluster, "localnet");
+        on_key(&mut app, KeyEvent::from(KeyCode::Char('[')));
+        assert_eq!(app.cluster, "testnet");
+        assert!(!app.cluster_menu, "direct switching never opens the dropdown");
+    }
+
+    #[test]
     fn cluster_dropdown_is_keyboard_driven() {
         let mut app = loaded();
         on_key(&mut app, KeyEvent::from(KeyCode::Char('c')));
@@ -469,41 +611,87 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_sidebar_screen_switches_view() {
+    fn clicking_a_section_opens_it() {
         let mut app = loaded();
+        app.goto(Screen::Overview);
         render(&mut app, 120, 34);
-        let tab = app
+        let logs_row = app
+            .sections()
+            .iter()
+            .position(|(screen, _, _)| *screen == Screen::Logs)
+            .expect("logs is a section");
+        let hit = app
             .hits
             .iter()
-            .find(|hit| hit.click == Click::Workspace(Screen::Logs))
+            .filter(|hit| hit.click == Click::Row(logs_row))
             .map(|hit| (hit.area.x, hit.area.y))
-            .expect("sidebar screen row is clickable");
-        app.click(tab.0, tab.1);
+            .next_back()
+            .expect("section row is clickable");
+        app.click(hit.0, hit.1);
+        assert!(matches!(app.screen, Screen::Logs));
         assert!(render(&mut app, 120, 34).contains("PROGRAM LOGS"));
     }
 
     #[test]
-    fn sidebar_swaps_between_history_and_entity_screens() {
+    fn overview_is_the_hub_for_every_section() {
         let mut app = loaded();
+        app.goto(Screen::Overview);
         let screen = render(&mut app, 120, 34);
-        assert!(screen.contains("← History"));
-        assert!(screen.contains("Overview"));
-        assert!(screen.contains("Logs"));
-        assert!(!screen.contains("HISTORY —"));
+        assert!(screen.contains("┌ Execution"), "sections render as boxes");
+        assert!(screen.contains("failed at 1.1"));
+        assert!(screen.contains("┌ Value Flow"));
+        assert!(screen.contains("lines"));
+
+        app.list.select(Some(0));
+        on_key(&mut app, KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(app.screen, Screen::Execution));
+        assert!(!app.focus_nav, "entering a section keeps focus in the panel");
+        on_key(&mut app, KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(app.screen, Screen::Overview), "esc returns to the hub");
 
         app.account = Some(solana::parse_account("8tK4iuyx", &account_fixture()));
         app.kind = solana::Kind::Account;
         app.goto(Screen::Info);
         let screen = render(&mut app, 120, 34);
-        assert!(screen.contains("Data"));
+        assert!(screen.contains("┌ Data"));
+        assert!(screen.contains("82 B"));
         assert!(!screen.contains("Execution"));
 
         on_key(&mut app, KeyEvent::from(KeyCode::Esc));
         on_key(&mut app, KeyEvent::from(KeyCode::Esc));
-        assert_eq!(app.sidebar, Sidebar::Entities);
+        assert!(app.focus_nav, "focus returns to the history sidebar");
         let screen = render(&mut app, 120, 34);
         assert!(screen.contains("HISTORY"));
-        assert!(!screen.contains("← History"));
+    }
+
+    #[test]
+    fn failed_transactions_open_on_the_failing_instruction() {
+        let mut app = App::new("devnet".into());
+        app.tx = Some(solana::parse("4vK9mP", "devnet", &fixture()));
+        app.kind = solana::Kind::Tx;
+        app.goto(Screen::Execution);
+
+        assert_eq!(app.selected_node(), app.tx().unwrap().failed_node);
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("custom program error: 0x1"));
+        assert!(screen.contains("8,420 self"));
+    }
+
+    #[test]
+    fn the_failure_path_is_marked_from_root_to_error() {
+        let mut app = loaded();
+        let tx = app.tx().unwrap();
+        assert_eq!(tx.failure_path(), vec![0, 1]);
+
+        app.goto(Screen::Execution);
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("↯"), "ancestors carry the propagation marker");
+        assert!(screen.contains("propagated"));
+        assert!(screen.contains("✕"));
+
+        app.collapsed.insert(0);
+        app.focus_failure();
+        assert!(!app.collapsed.contains(&0), "ancestors expand to reveal the failure");
     }
 
     #[test]
@@ -529,7 +717,6 @@ mod tests {
         app.goto(Screen::Accounts);
         app.account = Some(solana::parse_account("8tK4iuyx", &account_fixture()));
         app.kind = solana::Kind::Account;
-        app.sidebar = Sidebar::Screens;
         app.stack.push(app::Location {
             kind: solana::Kind::Tx,
             key: "4vK9mP".into(),
@@ -541,10 +728,9 @@ mod tests {
         on_key(&mut app, KeyEvent::from(KeyCode::Esc));
         assert_eq!(app.kind, solana::Kind::Tx);
         assert!(matches!(app.screen, Screen::Accounts));
-        assert_eq!(app.sidebar, Sidebar::Screens);
 
         on_key(&mut app, KeyEvent::from(KeyCode::Esc));
-        assert_eq!(app.sidebar, Sidebar::Entities);
+        assert!(app.focus_nav);
     }
 
     #[test]
@@ -563,7 +749,7 @@ mod tests {
         app.kind = solana::Kind::Account;
         app.focus_nav = true;
         on_key(&mut app, KeyEvent::from(KeyCode::Esc));
-        assert_eq!(app.sidebar, Sidebar::Entities);
+        assert!(app.focus_nav);
     }
 
     #[test]
@@ -576,10 +762,39 @@ mod tests {
 
         app.goto(Screen::Execution);
         app.list.select(Some(1));
-        assert_eq!(
-            app.selected_account().as_deref(),
-            Some("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
-        );
+        assert_eq!(app.selected_account(), None, "the tree never opens accounts");
+
+        on_key(&mut app, KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(app.screen, Screen::Invocation));
+        assert_eq!(app.node_index, Some(1));
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("INSTRUCTION 1.1"));
+        assert!(screen.contains("✕ failed"));
+        assert!(screen.contains("Call path"));
+        assert!(screen.contains("Vau1…1111  →  Token Program"));
+        assert!(screen.contains("custom program error: 0x1"));
+        assert!(screen.contains("LOGS"));
+
+        app.list.select(Some(0));
+        assert_eq!(app.selected_account().as_deref(), Some("Auth1111"));
+
+        on_key(&mut app, KeyEvent::from(KeyCode::Char('b')));
+        assert!(matches!(app.screen, Screen::Execution), "b steps back to the tree");
+    }
+
+    #[test]
+    fn overview_previews_the_failure_path_and_state_changes() {
+        let mut app = loaded();
+        app.goto(Screen::Overview);
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("BALANCE CHANGES"));
+        assert!(screen.contains("PRE"));
+        assert!(screen.contains("POST"));
+        assert!(screen.contains("CHANGE"));
+        assert!(screen.contains("FAILURE PATH"));
+        assert!(screen.contains("↯ 1 Vau1…1111"));
+        assert!(screen.contains("✕ 1.1 Token Program"));
+        assert!(screen.contains("Transaction Failed"));
     }
 
     #[test]
@@ -599,7 +814,6 @@ mod tests {
                 detail: "   82 B  Token Program".into(),
             },
         ];
-        app.sidebar = Sidebar::Entities;
         let screen = render(&mut app, 120, 34);
         assert!(screen.contains("tx:4GbW…5uRa"));
         assert!(screen.contains("acc:EPjF…Dt1v"));
@@ -622,6 +836,7 @@ mod tests {
             solana::explorer_url(&app.cluster, &kind, &key),
             "https://explorer.solana.com/tx/4vK9mP?cluster=devnet"
         );
+        app.tx = None;
         app.set_cluster("mainnet");
         assert_eq!(
             solana::explorer_url("mainnet", "tx", &key),
