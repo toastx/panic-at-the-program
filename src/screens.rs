@@ -443,6 +443,22 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
             Span::raw(node.program.clone()),
         ]),
     ];
+    let decoded = crate::idl::idl(&tx.cluster, &node.program)
+        .and_then(|idl| crate::idl::instruction(&idl, &crate::solana::bs58_decode(&node.data)));
+    if let Some(decoded) = &decoded {
+        facts.push(Line::from(vec![
+            Span::styled("Data        ", muted()),
+            Span::styled(decoded.name.clone(), Style::new().fg(Color::Rgb(96, 165, 250)).bold()),
+            Span::styled(
+                decoded
+                    .args
+                    .iter()
+                    .map(|(k, v)| format!("   {k} {}", short(v)))
+                    .collect::<String>(),
+                Style::new().fg(Color::Rgb(176, 180, 210)),
+            ),
+        ]));
+    } else {
     match crate::solana::decode_instruction(&node.program, &node.data) {
         Some((name, fields)) => facts.push(Line::from(vec![
             Span::styled("Data        ", muted()),
@@ -457,6 +473,7 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
             Span::styled(format!("{}  (base58, no decoder)", short(&node.data)), muted()),
         ])),
         None => {}
+    }
     }
     f.render_widget(Paragraph::new(facts), rows[1]);
 
@@ -498,12 +515,18 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
     let accounts_block = panel(&accounts_title, false).padding(Padding::horizontal(1));
     let accounts_inner = accounts_block.inner(panes[0]);
     f.render_widget(accounts_block, panes[0]);
+    let roles = decoded.map(|d| d.accounts).unwrap_or_default();
     let items: Vec<ListItem> = node
         .accounts
         .iter()
-        .map(|account| {
+        .enumerate()
+        .map(|(i, account)| {
             ListItem::new(Line::from(vec![
                 Span::styled("● ", Style::new().fg(if account.writable { ACCENT } else { MUTED })),
+                Span::styled(
+                    format!("{:<24.23} ", roles.get(i).cloned().unwrap_or_default()),
+                    Style::new().fg(Color::Rgb(96, 165, 250)),
+                ),
                 Span::raw(format!("{:<16}", short(&account.key))),
                 Span::styled(account.role(), muted()),
             ]))
@@ -997,9 +1020,20 @@ fn require_account<'a>(f: &mut Frame, area: Rect, app: &'a App, title: &str) -> 
     }
 }
 
+fn decode_account_fields(
+    cluster: &str,
+    account: &crate::solana::AccountInfo,
+) -> Option<(String, Vec<(String, String)>)> {
+    if let Some((layout, fields)) = crate::solana::decode_account(account) {
+        return Some((layout.to_string(), fields));
+    }
+    let idl = crate::idl::idl(cluster, &account.owner)?;
+    crate::idl::account(&idl, &account.data)
+}
+
 fn account_info(f: &mut Frame, area: Rect, app: &mut App) {
     let Some((account, inner)) = require_account(f, area, app, "ACCOUNT") else { return };
-    let decoded = crate::solana::decode_account(account);
+    let decoded = decode_account_fields(&app.cluster, account);
 
     let mut lines = vec![
         Line::from(vec![
@@ -1064,7 +1098,7 @@ fn account_data(f: &mut Frame, area: Rect, app: &mut App) {
         f.render_widget(wrapped("account holds no data", muted()), inner);
         return;
     }
-    let decoded = crate::solana::decode_account(account);
+    let decoded = decode_account_fields(&app.cluster, account);
     let parsed_height = decoded.as_ref().map_or(3, |(_, fields)| fields.len() as u16 + 3);
     let rows = Layout::vertical([Constraint::Length(parsed_height), Constraint::Min(3)]).split(inner);
 

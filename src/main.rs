@@ -1,5 +1,7 @@
 mod app;
 mod diagnose;
+mod idl;
+mod workspace;
 mod screens;
 mod solana;
 mod ui;
@@ -677,6 +679,89 @@ mod tests {
         let screen = render(&mut app, 120, 34);
         assert!(screen.contains("custom program error: 0x1"));
         assert!(screen.contains("8,420 self"));
+    }
+
+    #[test]
+    fn program_addresses_derive_off_curve() {
+        let token = solana::bs58_decode("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+        let mint = solana::bs58_decode("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        let owner = solana::bs58_decode("BdHB1RVLPXjs1yvH1Nt1rMW4nNzBjSuRtsvBh5zm8BBA");
+        let ata = solana::bs58_decode("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+
+        let (derived, bump) = idl::find_program_address(&[&owner, &token, &mint], &ata).unwrap();
+        assert!(bump > 240, "canonical bumps are near 255, got {bump}");
+        assert_eq!(derived.len(), 32);
+
+        let (again, same_bump) = idl::find_program_address(&[&owner, &token, &mint], &ata).unwrap();
+        assert_eq!((derived, bump), (again, same_bump), "derivation is deterministic");
+    }
+
+    #[test]
+    fn idl_decodes_errors_instructions_and_accounts() {
+        let idl = json!({
+            "address": "Vau1t1111111111111111111111111111111111111",
+            "instructions": [{
+                "name": "withdraw",
+                "discriminator": [1, 2, 3, 4, 5, 6, 7, 8],
+                "accounts": [{"name": "vault"}, {"name": "authority"}],
+                "args": [{"name": "amount", "type": "u64"}, {"name": "memo", "type": "string"}]
+            }],
+            "accounts": [{"name": "Vault", "discriminator": [9, 9, 9, 9, 9, 9, 9, 9]}],
+            "types": [{"name": "Vault", "type": {"fields": [
+                {"name": "owner", "type": "pubkey"},
+                {"name": "balance", "type": "u64"},
+                {"name": "frozen", "type": "bool"}
+            ]}}],
+            "errors": [{"code": 6001, "name": "SlippageExceeded", "msg": "price moved beyond tolerance"}]
+        });
+
+        let (name, message) = idl::error(&idl, 6001).unwrap();
+        assert_eq!(name, "SlippageExceeded");
+        assert_eq!(message, "price moved beyond tolerance");
+        assert!(idl::error(&idl, 6002).is_none());
+
+        let mut data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        data.extend_from_slice(&7_500_000u64.to_le_bytes());
+        data.extend_from_slice(&2u32.to_le_bytes());
+        data.extend_from_slice(b"hi");
+        let decoded = idl::instruction(&idl, &data).unwrap();
+        assert_eq!(decoded.name, "withdraw");
+        assert_eq!(decoded.args[0], ("amount".into(), "7500000".into()));
+        assert_eq!(decoded.args[1], ("memo".into(), "hi".into()));
+        assert_eq!(decoded.accounts, vec!["vault".to_string(), "authority".to_string()]);
+
+        let mut account_data = vec![9u8; 8];
+        account_data.extend_from_slice(&solana::bs58_decode("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"));
+        account_data.extend_from_slice(&42u64.to_le_bytes());
+        account_data.push(1);
+        let (layout, fields) = idl::account(&idl, &account_data).unwrap();
+        assert_eq!(layout, "Vault");
+        assert_eq!(fields[0].1, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        assert_eq!(fields[1], ("balance".into(), "42".into()));
+        assert_eq!(fields[2], ("frozen".into(), "true".into()));
+    }
+
+    #[test]
+    fn cached_idls_stay_out_of_the_history_list() {
+        let mut app = loaded();
+        app.entries = solana::entries("devnet");
+        assert!(
+            !app.entries.iter().any(|entry| entry.key.starts_with("idl-")),
+            "IDL cache files are not browsable entities"
+        );
+    }
+
+    #[test]
+    fn idl_errors_replace_the_generic_anchor_headline() {
+        let mut tx = solana::parse("s", "devnet", &fixture());
+        let idl = json!({"errors": [{"code": 6001, "name": "VaultLocked", "msg": "the vault is locked"}]});
+        let failure = tx.failure.as_mut().unwrap();
+        failure.code = diagnose::Code::Custom(6001);
+        failure.headline = "Anchor user error #1 — code 6001 (0x1771)".into();
+
+        let (name, message) = idl::error(&idl, 6001).unwrap();
+        assert_eq!(name, "VaultLocked");
+        assert_eq!(message, "the vault is locked");
     }
 
     #[test]

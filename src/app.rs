@@ -202,7 +202,9 @@ impl App {
     fn load_transaction(&mut self, signature: &str) {
         match solana::fetch(&self.cluster, signature) {
             Ok(value) => {
-                self.tx = Some(solana::parse(signature, &self.cluster, &value));
+                let mut tx = solana::parse(signature, &self.cluster, &value);
+                crate::idl::enrich(&mut tx);
+                self.tx = Some(tx);
                 self.collapsed.clear();
                 self.kind = Kind::Tx;
                 self.focus_nav = false;

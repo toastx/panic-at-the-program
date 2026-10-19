@@ -100,6 +100,7 @@ pub struct Entry {
 pub fn entries(cluster: &str) -> Vec<Entry> {
     cached(cluster)
         .into_iter()
+        .filter(|key| !key.starts_with("idl-"))
         .map(|key| match key.strip_prefix("account-") {
             Some(pubkey) => {
                 let account = load(cluster, &key).map(|value| parse_account(pubkey, &value));
@@ -559,6 +560,19 @@ pub fn fetch_account(cluster: &str, pubkey: &str) -> Result<Value, Box<dyn Error
     Ok(value)
 }
 
+pub fn accounts_info(cluster: &str, addresses: &[String]) -> Result<Vec<Value>, Box<dyn Error>> {
+    let value = rpc(cluster, "getMultipleAccounts", json!([addresses, {"encoding": "base64"}]))?;
+    Ok(value
+        .pointer("/result/value")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter(|v| !v.is_null()).cloned().collect())
+        .unwrap_or_default())
+}
+
+pub fn store_value(cluster: &str, key: &str, value: &Value) -> io::Result<()> {
+    store(cluster, key, value)
+}
+
 pub fn refetch_account(cluster: &str, pubkey: &str) -> Result<Value, Box<dyn Error>> {
     let _ = fs::remove_file(cache_path(cluster, &format!("account-{pubkey}")));
     fetch_account(cluster, pubkey)
@@ -577,7 +591,7 @@ pub fn parse_account(pubkey: &str, value: &Value) -> AccountInfo {
     }
 }
 
-fn base64_decode(input: &str) -> Vec<u8> {
+pub fn base64_decode(input: &str) -> Vec<u8> {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = Vec::with_capacity(input.len() * 3 / 4);
     let mut buffer = 0u32;
