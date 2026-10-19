@@ -154,7 +154,7 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
     })
 }
 
-fn rules(code: &Code, headline: &str, logs: &[String], cu: u32, cu_limit: u32) -> Vec<String> {
+pub fn rules(code: &Code, headline: &str, logs: &[String], cu: u32, cu_limit: u32) -> Vec<String> {
     let mut out = Vec::new();
     let text = logs.join("\n");
 

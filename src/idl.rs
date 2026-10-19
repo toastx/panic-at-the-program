@@ -4,7 +4,7 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use curve25519_dalek::edwards::CompressedEdwardsY;
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::solana::{self, bs58_decode, bs58_encode};
@@ -286,16 +286,23 @@ fn hex(bytes: &[u8]) -> String {
 
 pub fn enrich(tx: &mut solana::Tx) {
     let cluster = tx.cluster.clone();
+    let (cu, limit) = (tx.cu, tx.cu_limit);
+    let Some(node) = tx.failure.as_ref().and_then(|failure| failure.node) else { return };
+    let program = tx.nodes[node].program.clone();
+    let logs = tx.logs[tx.nodes[node].logs.clone()].to_vec();
     let Some(failure) = tx.failure.as_mut() else { return };
     let crate::diagnose::Code::Custom(code) = failure.code else { return };
-    let Some(node) = failure.node else { return };
-    let Some(idl) = idl(&cluster, &tx.nodes[node].program) else { return };
-    if let Some((name, message)) = error(&idl, code) {
-        failure.headline = format!("{name} — error {code} (0x{code:x})");
-        if !message.is_empty() {
-            failure.meaning = message;
-        }
-        failure.checks.retain(|check| !check.contains("error enum"));
+    let Some(idl) = idl(&cluster, &program) else { return };
+    let Some((name, message)) = error(&idl, code) else { return };
+
+    failure.headline = format!("{name} — error {code} (0x{code:x})");
+    if !message.is_empty() {
+        failure.meaning = message;
     }
-    let _ = json!({});
+    failure.checks.retain(|check| !check.contains("error enum"));
+    for check in crate::diagnose::rules(&failure.code, &failure.headline, &logs, cu, limit) {
+        if !failure.checks.contains(&check) {
+            failure.checks.push(check);
+        }
+    }
 }
