@@ -747,16 +747,18 @@ mod tests {
             "errors": [{"code": 6001, "name": "SlippageExceeded", "msg": "price moved beyond tolerance"}]
         });
 
-        let (name, message) = idl::error(&idl, 6001).unwrap();
+        let program = idl::parse(&idl);
+        assert_eq!(program.flavor, idl::Flavor::Anchor);
+        let (name, message) = idl::error(&program, 6001).unwrap();
         assert_eq!(name, "SlippageExceeded");
         assert_eq!(message, "price moved beyond tolerance");
-        assert!(idl::error(&idl, 6002).is_none());
+        assert!(idl::error(&program, 6002).is_none());
 
         let mut data = vec![1, 2, 3, 4, 5, 6, 7, 8];
         data.extend_from_slice(&7_500_000u64.to_le_bytes());
         data.extend_from_slice(&2u32.to_le_bytes());
         data.extend_from_slice(b"hi");
-        let decoded = idl::instruction(&idl, &data).unwrap();
+        let decoded = idl::instruction(&program, &data).unwrap();
         assert_eq!(decoded.name, "withdraw");
         assert_eq!(decoded.args[0], ("amount".into(), "7500000".into()));
         assert_eq!(decoded.args[1], ("memo".into(), "hi".into()));
@@ -766,7 +768,7 @@ mod tests {
         account_data.extend_from_slice(&solana::bs58_decode("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"));
         account_data.extend_from_slice(&42u64.to_le_bytes());
         account_data.push(1);
-        let (layout, fields) = idl::account(&idl, &account_data).unwrap();
+        let (layout, fields) = idl::account(&program, &account_data).unwrap();
         assert_eq!(layout, "Vault");
         assert_eq!(fields[0].1, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
         assert_eq!(fields[1], ("balance".into(), "42".into()));
@@ -784,6 +786,114 @@ mod tests {
     }
 
     #[test]
+    fn shank_idls_are_detected_and_decoded() {
+        let shank = json!({
+            "version": "1.0.0",
+            "name": "mpl_token_metadata",
+            "instructions": [{
+                "name": "CreateMetadataAccount",
+                "accounts": [
+                    {"name": "metadata", "isMut": true, "isSigner": false},
+                    {"name": "payer", "isMut": true, "isSigner": true}
+                ],
+                "args": [{"name": "lamports", "type": "u64"}],
+                "discriminant": {"type": "u8", "value": 33}
+            }],
+            "accounts": [{"name": "Metadata", "type": {"kind": "struct", "fields": [
+                {"name": "updateAuthority", "type": "publicKey"},
+                {"name": "primarySaleHappened", "type": "bool"}
+            ]}}],
+            "errors": [{"code": 0, "name": "InstructionUnpackError", "msg": "Instruction unpack error"}],
+            "metadata": {"origin": "shank", "address": "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"}
+        });
+
+        let program = idl::parse(&shank);
+        assert_eq!(program.flavor, idl::Flavor::Shank);
+        assert_eq!(program.address.as_deref(), Some("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"));
+        assert_eq!(program.instructions[0].discriminator, vec![33], "shank uses a single-byte discriminant");
+        assert!(program.instructions[0].accounts[1].signer);
+        assert!(program.instructions[0].accounts[0].writable);
+
+        let mut data = vec![33u8];
+        data.extend_from_slice(&4_200_000u64.to_le_bytes());
+        let decoded = idl::instruction(&program, &data).unwrap();
+        assert_eq!(decoded.name, "CreateMetadataAccount");
+        assert_eq!(decoded.args[0], ("lamports".into(), "4200000".into()));
+
+        let (name, message) = idl::error(&program, 0).unwrap();
+        assert_eq!(name, "InstructionUnpackError");
+        assert_eq!(message, "Instruction unpack error");
+    }
+
+    #[test]
+    fn codama_idls_are_detected_and_decoded() {
+        let codama = json!({
+            "kind": "rootNode",
+            "standard": "codama",
+            "program": {
+                "kind": "programNode",
+                "name": "vault",
+                "publicKey": "Vau1t11111111111111111111111111111111111",
+                "accounts": [{
+                    "kind": "accountNode",
+                    "name": "vault",
+                    "data": {"kind": "structTypeNode", "fields": [
+                        {"kind": "structFieldTypeNode", "name": "discriminator", "type": {"kind": "numberTypeNode", "format": "u8"},
+                         "defaultValue": {"kind": "numberValueNode", "number": 7}, "defaultValueStrategy": "omitted"},
+                        {"kind": "structFieldTypeNode", "name": "owner", "type": {"kind": "publicKeyTypeNode"}},
+                        {"kind": "structFieldTypeNode", "name": "balance", "type": {"kind": "numberTypeNode", "format": "u64"}}
+                    ]},
+                    "discriminators": [{"kind": "fieldDiscriminatorNode", "name": "discriminator", "offset": 0}]
+                }],
+                "instructions": [{
+                    "kind": "instructionNode",
+                    "name": "withdraw",
+                    "accounts": [
+                        {"kind": "instructionAccountNode", "name": "vault", "isWritable": true, "isSigner": false},
+                        {"kind": "instructionAccountNode", "name": "authority", "isWritable": false, "isSigner": true}
+                    ],
+                    "arguments": [
+                        {"kind": "instructionArgumentNode", "name": "discriminator", "type": {"kind": "numberTypeNode", "format": "u8"},
+                         "defaultValue": {"kind": "numberValueNode", "number": 3}, "defaultValueStrategy": "omitted"},
+                        {"kind": "instructionArgumentNode", "name": "amount", "type": {"kind": "numberTypeNode", "format": "u64"}},
+                        {"kind": "instructionArgumentNode", "name": "memo", "type": {"kind": "sizePrefixTypeNode", "type": {"kind": "stringTypeNode"}}}
+                    ],
+                    "discriminators": [{"kind": "fieldDiscriminatorNode", "name": "discriminator", "offset": 0}]
+                }],
+                "errors": [{"kind": "errorNode", "name": "vaultLocked", "code": 6001, "message": "the vault is locked"}]
+            }
+        });
+
+        let program = idl::parse(&codama);
+        assert_eq!(program.flavor, idl::Flavor::Codama);
+        assert_eq!(program.address.as_deref(), Some("Vau1t11111111111111111111111111111111111"));
+        assert_eq!(program.instructions[0].discriminator, vec![3]);
+        assert!(program.instructions[0].accounts[1].signer);
+        assert!(!program.instructions[0].accounts[1].writable);
+
+        let mut data = vec![3u8];
+        data.extend_from_slice(&999u64.to_le_bytes());
+        data.extend_from_slice(&2u32.to_le_bytes());
+        data.extend_from_slice(b"ok");
+        let decoded = idl::instruction(&program, &data).unwrap();
+        assert_eq!(decoded.name, "withdraw");
+        assert_eq!(decoded.args[0], ("amount".into(), "999".into()));
+        assert_eq!(decoded.args[1], ("memo".into(), "ok".into()));
+        assert_eq!(decoded.accounts, vec!["vault".to_string(), "authority".to_string()]);
+
+        let mut account_data = vec![7u8];
+        account_data.extend_from_slice(&solana::bs58_decode("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"));
+        account_data.extend_from_slice(&55u64.to_le_bytes());
+        let (layout, fields) = idl::account(&program, &account_data).unwrap();
+        assert_eq!(layout, "vault");
+        assert_eq!(fields[1], ("balance".into(), "55".into()));
+
+        let (name, message) = idl::error(&program, 6001).unwrap();
+        assert_eq!(name, "vaultLocked");
+        assert_eq!(message, "the vault is locked");
+    }
+
+    #[test]
     fn idl_errors_replace_the_generic_anchor_headline() {
         let mut tx = solana::parse("s", "devnet", &fixture());
         let idl = json!({"errors": [{"code": 6001, "name": "VaultLocked", "msg": "the vault is locked"}]});
@@ -791,7 +901,7 @@ mod tests {
         failure.code = diagnose::Code::Custom(6001);
         failure.headline = "Anchor user error #1 — code 6001 (0x1771)".into();
 
-        let (name, message) = idl::error(&idl, 6001).unwrap();
+        let (name, message) = idl::error(&idl::parse(&idl), 6001).unwrap();
         assert_eq!(name, "VaultLocked");
         assert_eq!(message, "the vault is locked");
     }
@@ -837,8 +947,9 @@ mod tests {
                 {"kind": "account", "path": "authority"}
             ]}}
         ]);
+        let specs = idl::account_specs(&specs);
 
-        let findings = validate::declared_findings(specs.as_array().unwrap(), node);
+        let findings = validate::declared_findings(&specs, node);
         let pda = findings
             .iter()
             .find(|f| f.message.contains("PDA"))
@@ -851,12 +962,12 @@ mod tests {
 
         let partial = json!([{"name": "authority", "signer": true, "writable": true}]);
         assert!(
-            validate::declared_findings(partial.as_array().unwrap(), node).is_empty(),
+            validate::declared_findings(&idl::account_specs(&partial), node).is_empty(),
             "optional accounts shift indices, so mismatched counts are not checked positionally"
         );
 
         let fixed = json!([{"name": "authority"}, {"name": "token_program", "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}]);
-        let findings = validate::declared_findings(fixed.as_array().unwrap(), node);
+        let findings = validate::declared_findings(&idl::account_specs(&fixed), node);
         let address = findings.iter().find(|f| f.message.contains("address")).unwrap();
         assert_eq!(address.expected.as_deref(), Some("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"));
         assert_eq!(address.actual.as_deref(), Some("Vau1t111"));

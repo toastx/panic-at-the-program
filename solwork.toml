@@ -2,6 +2,9 @@ idl_dir = "target/idl"
 
 [idl]
 
+[idl.kind]
+JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 = "anchor"
+
 [programs]
 JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 = "Jupiter"
 

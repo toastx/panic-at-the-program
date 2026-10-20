@@ -86,14 +86,9 @@ pub fn check(cluster: &str, tx: &Tx, index: usize) -> Vec<Finding> {
 
     let mut findings = Vec::new();
     let mut roles = Vec::new();
-    if let Some((idl, decoded)) = &decoded {
-        let specs = idl["instructions"]
-            .as_array()
-            .and_then(|list| list.iter().find(|entry| entry["name"].as_str() == Some(decoded.name.as_str())))
-            .and_then(|entry| entry["accounts"].as_array().cloned())
-            .unwrap_or_default();
+    if let Some((_, decoded)) = &decoded {
         roles = decoded.accounts.clone();
-        findings.extend(declared_findings(&specs, node));
+        findings.extend(declared_findings(&decoded.specs, node));
     }
 
     let keys: Vec<String> = node.accounts.iter().map(|a| a.key.clone()).collect();
@@ -103,13 +98,13 @@ pub fn check(cluster: &str, tx: &Tx, index: usize) -> Vec<Finding> {
     findings
 }
 
-pub fn declared_findings(specs: &[Value], node: &Node) -> Vec<Finding> {
+pub fn declared_findings(specs: &[idl::AccountSpec], node: &Node) -> Vec<Finding> {
     if specs.len() != node.accounts.len() {
         return Vec::new();
     }
     let mut findings = Vec::new();
     for (i, spec) in specs.iter().enumerate() {
-        let role = spec["name"].as_str().unwrap_or_default().to_string();
+        let role = spec.name.clone();
         let Some(actual) = node.accounts.get(i) else {
             findings.push(Finding {
                 index: i,
@@ -132,13 +127,13 @@ pub fn declared_findings(specs: &[Value], node: &Node) -> Vec<Finding> {
             actual: actual_value,
         };
 
-        if spec["signer"].as_bool() == Some(true) && !actual.signer {
+        if spec.signer && !actual.signer {
             findings.push(finding(Level::Error, "declared as signer but did not sign".into(), None, None));
         }
-        if spec["writable"].as_bool() == Some(true) && !actual.writable {
+        if spec.writable && !actual.writable {
             findings.push(finding(Level::Error, "declared writable but passed read-only".into(), None, None));
         }
-        if let Some(fixed) = spec["address"].as_str() {
+        if let Some(fixed) = spec.address.as_deref() {
             if fixed != actual.key {
                 findings.push(finding(
                     Level::Error,
@@ -147,6 +142,14 @@ pub fn declared_findings(specs: &[Value], node: &Node) -> Vec<Finding> {
                     Some(actual.key.clone()),
                 ));
             }
+        }
+        if let Some(unresolved) = unresolved_seed(spec) {
+            findings.push(finding(
+                Level::Warn,
+                format!("PDA seed `{unresolved}` comes from an instruction argument — not verified"),
+                None,
+                None,
+            ));
         }
         if let Some(expected) = derive_pda(spec, &node.program, specs, node) {
             if expected != actual.key {
@@ -223,25 +226,23 @@ fn find_ata(owner: &str, mint: &str) -> Option<String> {
     Some(bs58_encode(&address))
 }
 
-fn derive_pda(spec: &Value, program: &str, specs: &[Value], node: &Node) -> Option<String> {
-    let seeds = spec.pointer("/pda/seeds")?.as_array()?;
+fn unresolved_seed(spec: &idl::AccountSpec) -> Option<String> {
+    spec.seeds.as_ref()?.iter().find_map(|seed| match seed {
+        idl::Seed::Arg(name) => Some(name.clone()),
+        _ => None,
+    })
+}
+
+fn derive_pda(spec: &idl::AccountSpec, program: &str, specs: &[idl::AccountSpec], node: &Node) -> Option<String> {
     let mut parts: Vec<Vec<u8>> = Vec::new();
-    for seed in seeds {
-        match seed["kind"].as_str()? {
-            "const" => parts.push(
-                seed["value"]
-                    .as_array()?
-                    .iter()
-                    .filter_map(Value::as_u64)
-                    .map(|b| b as u8)
-                    .collect(),
-            ),
-            "account" => {
-                let path = seed["path"].as_str()?;
-                let position = specs.iter().position(|s| s["name"].as_str() == Some(path))?;
+    for seed in spec.seeds.as_ref()? {
+        match seed {
+            idl::Seed::Const(bytes) => parts.push(bytes.clone()),
+            idl::Seed::Account(path) => {
+                let position = specs.iter().position(|s| s.name == *path)?;
                 parts.push(bs58_decode(&node.accounts.get(position)?.key));
             }
-            _ => return None,
+            idl::Seed::Arg(_) => return None,
         }
     }
     let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();

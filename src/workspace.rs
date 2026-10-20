@@ -1,16 +1,28 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
 pub struct Config {
     pub root: PathBuf,
     sections: HashMap<String, HashMap<String, String>>,
 }
 
-static CONFIG: OnceLock<Option<Config>> = OnceLock::new();
+thread_local! {
+    static CONFIG: RefCell<Option<Option<Config>>> = const { RefCell::new(None) };
+}
 
-pub fn config() -> Option<&'static Config> {
-    CONFIG.get_or_init(load).as_ref()
+fn with_config<T>(read: impl FnOnce(Option<&Config>) -> T) -> T {
+    CONFIG.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(load());
+        }
+        read(slot.as_ref().and_then(|config| config.as_ref()))
+    })
+}
+
+pub fn reload() {
+    CONFIG.with(|cell| *cell.borrow_mut() = None);
 }
 
 fn load() -> Option<Config> {
@@ -52,7 +64,7 @@ pub fn parse(text: &str) -> HashMap<String, HashMap<String, String>> {
 }
 
 pub fn value(section: &str, key: &str) -> Option<String> {
-    config()?.sections.get(section)?.get(key).cloned()
+    with_config(|config| config?.sections.get(section)?.get(key).cloned())
 }
 
 pub fn label(section: &str, key: &str) -> Option<String> {
@@ -60,7 +72,7 @@ pub fn label(section: &str, key: &str) -> Option<String> {
 }
 
 pub fn root() -> Option<PathBuf> {
-    Some(config()?.root.clone())
+    with_config(|config| Some(config?.root.clone()))
 }
 
 pub fn idl_dir() -> PathBuf {
@@ -73,4 +85,54 @@ pub fn idl_dir() -> PathBuf {
 
 pub fn idl_path(program: &str) -> Option<PathBuf> {
     Some(root()?.join(value("idl", program)?))
+}
+
+pub fn append_entry(section: &str, key: &str, value_text: &str) -> std::io::Result<()> {
+    let Some(root) = root() else { return Ok(()) };
+    let path = ["solwork.toml", ".solwork"]
+        .iter()
+        .map(|name| root.join(name))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| root.join("solwork.toml"));
+
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let header = format!("[{section}]");
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let entry = format!("{key} = \"{value_text}\"");
+
+    match lines.iter().position(|line| line.trim() == header) {
+        Some(start) => {
+            let end = lines[start + 1..]
+                .iter()
+                .position(|line| line.trim().starts_with('['))
+                .map(|offset| start + 1 + offset)
+                .unwrap_or(lines.len());
+            if let Some(existing) = lines[start + 1..end]
+                .iter()
+                .position(|line| line.trim_start().starts_with(key))
+            {
+                lines[start + 1 + existing] = entry;
+            } else {
+                lines.insert(end, entry);
+            }
+        }
+        None => {
+            if !lines.last().is_some_and(|line| line.trim().is_empty()) {
+                lines.push(String::new());
+            }
+            lines.push(header);
+            lines.push(entry);
+        }
+    }
+
+    std::fs::write(&path, format!("{}\n", lines.join("\n")))?;
+    reload();
+    Ok(())
+}
+
+pub fn record_flavor(program: &str, flavor: &str) {
+    if value("idl.kind", program).as_deref() == Some(flavor) {
+        return;
+    }
+    let _ = append_entry("idl.kind", program, flavor);
 }
