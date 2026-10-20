@@ -361,6 +361,58 @@ fn anchor_hint(code: u32) -> Option<&'static str> {
     })
 }
 
+pub fn infer_custom(code: u32, flavor: Option<crate::idl::Flavor>) -> (String, String, String) {
+    use crate::idl::Flavor;
+
+    let hex = format!("error {code} (0x{code:x})");
+    match flavor {
+        Some(Flavor::Anchor | Flavor::AnchorLegacy) if code >= 6000 => (
+            format!("Anchor user error #{} — {hex}", code - 6000),
+            "the deployed program raised a code its IDL does not list".to_string(),
+            "the on-chain IDL may be older than the deployed program — redeploy or refresh it".to_string(),
+        ),
+        Some(Flavor::Anchor | Flavor::AnchorLegacy) => match anchor_error(code) {
+            Some((name, meaning)) => (
+                format!("{name} — Anchor {hex}"),
+                meaning.to_string(),
+                "raised by the Anchor framework, not the program's own error enum".to_string(),
+            ),
+            None => (
+                format!("Anchor program error — {hex}"),
+                "below Anchor's 6000 user range, so it came from the framework".to_string(),
+                "check the account constraints on the failing instruction".to_string(),
+            ),
+        },
+        Some(flavor @ (Flavor::Shank | Flavor::Codama)) => (
+            format!("program error #{code} — {hex}"),
+            format!("{} programs number their errors from 0", flavor.label()),
+            format!("error {code} is the {} entry of the program's error enum", ordinal(code + 1)),
+        ),
+        None if code >= 6000 => (
+            format!("Anchor user error #{} — {hex}", code - 6000),
+            "the 6000 range is Anchor's user-defined block".to_string(),
+            "no IDL found for this program — drop one in target/idl or point at it from solwork.toml".to_string(),
+        ),
+        None => (
+            format!("custom program error {code} (0x{code:x})"),
+            "no IDL and no known error table for this program".to_string(),
+            "programs outside Anchor usually number errors from 0, so this is likely their enum index"
+                .to_string(),
+        ),
+    }
+}
+
+fn ordinal(n: u32) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (1, 11) | (2, 12) | (3, 13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
 fn runtime_error(name: &str) -> &'static str {
     match name {
         "MissingRequiredSignature" => "an account that must sign did not sign",

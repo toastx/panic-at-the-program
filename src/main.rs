@@ -786,6 +786,49 @@ mod tests {
     }
 
     #[test]
+    fn unknown_codes_are_inferred_from_the_idl_flavor() {
+        use idl::Flavor;
+
+        let (headline, meaning, hint) = diagnose::infer_custom(6001, Some(Flavor::Anchor));
+        assert!(headline.contains("Anchor user error #1"));
+        assert!(meaning.contains("does not list"));
+        assert!(hint.contains("older than the deployed program"));
+
+        let (headline, _, hint) = diagnose::infer_custom(2006, Some(Flavor::Anchor));
+        assert!(headline.contains("ConstraintSeeds"));
+        assert!(hint.contains("framework"));
+
+        let (headline, meaning, hint) = diagnose::infer_custom(3, Some(Flavor::Shank));
+        assert!(headline.contains("program error #3"), "{headline}");
+        assert!(meaning.contains("number their errors from 0"));
+        assert!(hint.contains("4th entry"), "{hint}");
+
+        let (headline, _, hint) = diagnose::infer_custom(7, Some(Flavor::Codama));
+        assert!(headline.contains("program error #7"));
+        assert!(hint.contains("8th entry"));
+
+        let (headline, _, hint) = diagnose::infer_custom(3, None);
+        assert!(headline.contains("custom program error 3"));
+        assert!(hint.contains("number errors from 0"));
+    }
+
+    #[test]
+    fn custom_error_names_come_from_the_workspace_table() {
+        let parsed = workspace::parse(
+            r#"
+            [errors.Vau1t11111111111111111111111111111111111]
+            3 = "InsufficientLiquidity: the pool cannot cover this swap"
+            9 = "PoolPaused"
+            12 = ""
+            "#,
+        );
+        let table = &parsed["errors.Vau1t11111111111111111111111111111111111"];
+        assert_eq!(table["3"], "InsufficientLiquidity: the pool cannot cover this swap");
+        assert_eq!(table["9"], "PoolPaused");
+        assert_eq!(table["12"], "", "an empty stub is a placeholder, not a name");
+    }
+
+    #[test]
     fn shank_idls_are_detected_and_decoded() {
         let shank = json!({
             "version": "1.0.0",

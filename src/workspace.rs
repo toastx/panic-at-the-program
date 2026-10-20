@@ -130,6 +130,24 @@ pub fn append_entry(section: &str, key: &str, value_text: &str) -> std::io::Resu
     Ok(())
 }
 
+pub fn error_label(program: &str, code: u32) -> Option<(String, String)> {
+    let text = value(&format!("errors.{program}"), &code.to_string())?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(match text.split_once(':') {
+        Some((name, message)) => (name.trim().to_string(), message.trim().to_string()),
+        None => (text.trim().to_string(), String::new()),
+    })
+}
+
+pub fn record_error_stub(program: &str, code: u32) {
+    if root().is_none() || value(&format!("errors.{program}"), &code.to_string()).is_some() {
+        return;
+    }
+    let _ = append_entry(&format!("errors.{program}"), &code.to_string(), "");
+}
+
 pub fn record_flavor(program: &str, flavor: &str) {
     if value("idl.kind", program).as_deref() == Some(flavor) {
         return;

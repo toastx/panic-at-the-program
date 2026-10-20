@@ -732,16 +732,43 @@ pub fn enrich(tx: &mut solana::Tx) {
     let Some(node) = tx.failure.as_ref().and_then(|failure| failure.node) else { return };
     let program = tx.nodes[node].program.clone();
     let logs = tx.logs[tx.nodes[node].logs.clone()].to_vec();
+    let parsed = idl(&cluster, &program);
     let Some(failure) = tx.failure.as_mut() else { return };
     let crate::diagnose::Code::Custom(code) = failure.code else { return };
-    let Some(idl) = idl(&cluster, &program) else { return };
-    let Some((name, message)) = error(&idl, code) else { return };
 
-    failure.headline = format!("{name} — error {code} (0x{code:x})");
-    if !message.is_empty() {
-        failure.meaning = message;
+    let named = crate::workspace::error_label(&program, code)
+        .map(|(name, message)| (name, message, "solwork.toml".to_string()))
+        .or_else(|| {
+            let parsed = parsed.as_ref()?;
+            let (name, message) = error(parsed, code)?;
+            Some((name, message, parsed.flavor.label().to_string()))
+        });
+
+    match named {
+        Some((name, message, source)) => {
+            failure.headline = format!("{name} — error {code} (0x{code:x})");
+            if !message.is_empty() {
+                failure.meaning = message;
+            }
+            failure.checks.retain(|check| !check.contains("error enum"));
+            if source == "solwork.toml" {
+                failure.checks.push("named by your solwork.toml error table".to_string());
+            }
+        }
+        None => {
+            let flavor = parsed.as_ref().map(|parsed| parsed.flavor);
+            let (headline, meaning, hint) = crate::diagnose::infer_custom(code, flavor);
+            failure.headline = headline;
+            failure.meaning = meaning;
+            failure.checks.retain(|check| !check.contains("error enum"));
+            failure.checks.push(hint);
+            failure.checks.push(format!(
+                "name it in solwork.toml: [errors.{program}] {code} = \"Name: what it means\""
+            ));
+            crate::workspace::record_error_stub(&program, code);
+        }
     }
-    failure.checks.retain(|check| !check.contains("error enum"));
+
     for check in crate::diagnose::rules(&failure.code, &failure.headline, &logs, cu, limit) {
         if !failure.checks.contains(&check) {
             failure.checks.push(check);

@@ -9,3 +9,6 @@ JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 = "anchor"
 JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 = "Jupiter"
 
 [accounts]
+
+[errors.6NLUrxEwyVH9nepUNqbPaJmDEfWpEKbvG1v7GPmDAJ1Q]
+3 = "InsufficientLiquidity: the pool cannot cover this swap"
