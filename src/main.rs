@@ -813,6 +813,21 @@ mod tests {
     }
 
     #[test]
+    fn the_workspace_config_is_the_users_project_not_this_repo() {
+        let root = workspace::project_root().unwrap();
+        assert!(
+            root.join("Anchor.toml").exists() || root.join("Cargo.toml").exists() || root.join(".git").exists(),
+            "config lands at the project root, not wherever the binary lives"
+        );
+
+        let ignored = std::fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
+        assert!(
+            ignored.lines().any(|line| line.trim() == "patp.toml"),
+            "a config written into a project is that project's, never ours to commit"
+        );
+    }
+
+    #[test]
     fn custom_error_names_come_from_the_workspace_table() {
         let parsed = workspace::parse(
             r#"

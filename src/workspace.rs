@@ -28,7 +28,7 @@ pub fn reload() {
 fn load() -> Option<Config> {
     let mut dir = std::env::current_dir().ok()?;
     loop {
-        for name in ["solwork.toml", ".solwork"] {
+        for name in ["patp.toml", ".patp"] {
             let path = dir.join(name);
             if path.is_file() {
                 let text = std::fs::read_to_string(&path).ok()?;
@@ -39,6 +39,25 @@ fn load() -> Option<Config> {
             return None;
         }
     }
+}
+
+pub fn project_root() -> Option<PathBuf> {
+    if let Some(root) = root() {
+        return Some(root);
+    }
+    let start = std::env::current_dir().ok()?;
+    for marker in ["Anchor.toml", "Cargo.toml", ".git"] {
+        let mut dir = start.clone();
+        loop {
+            if dir.join(marker).exists() {
+                return Some(dir);
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+    Some(start)
 }
 
 pub fn parse(text: &str) -> HashMap<String, HashMap<String, String>> {
@@ -76,7 +95,7 @@ pub fn root() -> Option<PathBuf> {
 }
 
 pub fn idl_dir() -> PathBuf {
-    let base = root().unwrap_or_default();
+    let base = project_root().unwrap_or_default();
     match value("", "idl_dir") {
         Some(dir) => base.join(dir),
         None => base.join("target/idl"),
@@ -88,12 +107,12 @@ pub fn idl_path(program: &str) -> Option<PathBuf> {
 }
 
 pub fn append_entry(section: &str, key: &str, value_text: &str) -> std::io::Result<()> {
-    let Some(root) = root() else { return Ok(()) };
-    let path = ["solwork.toml", ".solwork"]
+    let Some(root) = project_root() else { return Ok(()) };
+    let path = ["patp.toml", ".patp"]
         .iter()
         .map(|name| root.join(name))
         .find(|path| path.is_file())
-        .unwrap_or_else(|| root.join("solwork.toml"));
+        .unwrap_or_else(|| root.join("patp.toml"));
 
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let header = format!("[{section}]");
@@ -142,7 +161,7 @@ pub fn error_label(program: &str, code: u32) -> Option<(String, String)> {
 }
 
 pub fn record_error_stub(program: &str, code: u32) {
-    if root().is_none() || value(&format!("errors.{program}"), &code.to_string()).is_some() {
+    if value(&format!("errors.{program}"), &code.to_string()).is_some() {
         return;
     }
     let _ = append_entry(&format!("errors.{program}"), &code.to_string(), "");

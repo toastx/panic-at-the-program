@@ -391,7 +391,7 @@ pub fn infer_custom(code: u32, flavor: Option<crate::idl::Flavor>) -> (String, S
         None if code >= 6000 => (
             format!("Anchor user error #{} — {hex}", code - 6000),
             "the 6000 range is Anchor's user-defined block".to_string(),
-            "no IDL found for this program — drop one in target/idl or point at it from solwork.toml".to_string(),
+            "no IDL found for this program — drop one in target/idl or point at it from patp.toml".to_string(),
         ),
         None => (
             format!("custom program error {code} (0x{code:x})"),

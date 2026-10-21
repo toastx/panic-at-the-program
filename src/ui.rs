@@ -95,7 +95,7 @@ pub fn tree_prefixes(nodes: &[Node]) -> Vec<String> {
 }
 
 pub fn render_topbar(f: &mut Frame, area: Rect, app: &mut App) {
-    let mut spans = vec![Span::styled(" SOLWORK ", Style::new().fg(ACCENT).bold()), Span::styled("│", muted())];
+    let mut spans = vec![Span::styled(" PANIC ", Style::new().fg(ACCENT).bold()), Span::styled("│", muted())];
 
     let x = area.x + spans.iter().map(|s| s.width() as u16).sum::<u16>();
     let label = format!(" ● {} {} ", app.cluster, if app.cluster_menu { "▴" } else { "▾" });

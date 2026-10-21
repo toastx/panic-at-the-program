@@ -1,7 +1,11 @@
 [package]
-name = "tui"
+name = "patp"
 version = "0.1.0"
 edition = "2024"
+
+[[bin]]
+name = "panic"
+path = "src/main.rs"
 
 [dependencies]
 crossterm = "0.29.0"

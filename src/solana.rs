@@ -62,7 +62,7 @@ pub struct Tx {
 }
 
 fn cache_dir() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/solwork")
+    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/panic")
 }
 
 fn cache_path(cluster: &str, key: &str) -> PathBuf {

@@ -737,7 +737,7 @@ pub fn enrich(tx: &mut solana::Tx) {
     let crate::diagnose::Code::Custom(code) = failure.code else { return };
 
     let named = crate::workspace::error_label(&program, code)
-        .map(|(name, message)| (name, message, "solwork.toml".to_string()))
+        .map(|(name, message)| (name, message, "patp.toml".to_string()))
         .or_else(|| {
             let parsed = parsed.as_ref()?;
             let (name, message) = error(parsed, code)?;
@@ -751,8 +751,8 @@ pub fn enrich(tx: &mut solana::Tx) {
                 failure.meaning = message;
             }
             failure.checks.retain(|check| !check.contains("error enum"));
-            if source == "solwork.toml" {
-                failure.checks.push("named by your solwork.toml error table".to_string());
+            if source == "patp.toml" {
+                failure.checks.push("named by your patp.toml error table".to_string());
             }
         }
         None => {
@@ -763,7 +763,7 @@ pub fn enrich(tx: &mut solana::Tx) {
             failure.checks.retain(|check| !check.contains("error enum"));
             failure.checks.push(hint);
             failure.checks.push(format!(
-                "name it in solwork.toml: [errors.{program}] {code} = \"Name: what it means\""
+                "name it in patp.toml: [errors.{program}] {code} = \"Name: what it means\""
             ));
             crate::workspace::record_error_stub(&program, code);
         }
