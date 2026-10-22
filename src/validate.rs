@@ -87,7 +87,7 @@ pub fn check(cluster: &str, tx: &Tx, index: usize) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut roles = Vec::new();
     if let Some((_, decoded)) = &decoded {
-        roles = decoded.accounts.clone();
+        roles = decoded.specs.iter().map(|spec| spec.name.clone()).collect();
         findings.extend(declared_findings(&decoded.specs, node));
     }
 
@@ -104,22 +104,10 @@ pub fn declared_findings(specs: &[idl::AccountSpec], node: &Node) -> Vec<Finding
     }
     let mut findings = Vec::new();
     for (i, spec) in specs.iter().enumerate() {
-        let role = spec.name.clone();
-        let Some(actual) = node.accounts.get(i) else {
-            findings.push(Finding {
-                index: i,
-                role,
-                key: String::new(),
-                level: Level::Error,
-                message: "account missing from the instruction".to_string(),
-                expected: None,
-                actual: None,
-            });
-            continue;
-        };
+        let actual = &node.accounts[i];
         let finding = |level, message: String, expected, actual_value| Finding {
             index: i,
-            role: role.clone(),
+            role: spec.name.clone(),
             key: actual.key.clone(),
             level,
             message,

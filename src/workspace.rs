@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+const NAMES: [&str; 2] = ["patp.toml", ".patp"];
 
 pub struct Config {
     pub root: PathBuf,
@@ -28,7 +30,7 @@ pub fn reload() {
 fn load() -> Option<Config> {
     let mut dir = std::env::current_dir().ok()?;
     loop {
-        for name in ["patp.toml", ".patp"] {
+        for name in NAMES {
             let path = dir.join(name);
             if path.is_file() {
                 let text = std::fs::read_to_string(&path).ok()?;
@@ -42,22 +44,11 @@ fn load() -> Option<Config> {
 }
 
 pub fn project_root() -> Option<PathBuf> {
-    if let Some(root) = root() {
-        return Some(root);
-    }
     let start = std::env::current_dir().ok()?;
-    for marker in ["Anchor.toml", "Cargo.toml", ".git"] {
-        let mut dir = start.clone();
-        loop {
-            if dir.join(marker).exists() {
-                return Some(dir);
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-    }
-    Some(start)
+    let marked = ["Anchor.toml", "Cargo.toml", ".git"]
+        .iter()
+        .find_map(|marker| start.ancestors().find(|dir| dir.join(marker).exists()));
+    root().or_else(|| marked.map(PathBuf::from)).or(Some(start))
 }
 
 pub fn parse(text: &str) -> HashMap<String, HashMap<String, String>> {
@@ -86,8 +77,32 @@ pub fn value(section: &str, key: &str) -> Option<String> {
     with_config(|config| config?.sections.get(section)?.get(key).cloned())
 }
 
-pub fn label(section: &str, key: &str) -> Option<String> {
-    value(section, key)
+pub fn home() -> PathBuf {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default()
+}
+
+/// User-wide settings (custom RPCs), separate from the per-workspace patp.toml.
+pub fn global_path() -> PathBuf {
+    home().join(".config/panic/config.toml")
+}
+
+// ponytail: re-read on every call, cache it if the menu ever feels slow.
+pub fn global(section: &str) -> Vec<(String, String)> {
+    let text = std::fs::read_to_string(global_path()).unwrap_or_default();
+    let mut entries: Vec<_> = parse(&text).remove(section).unwrap_or_default().into_iter().collect();
+    entries.sort();
+    entries
+}
+
+pub fn set_global(section: &str, key: &str, value_text: &str) -> std::io::Result<()> {
+    let path = global_path();
+    std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
+    write_entry(&path, section, key, Some(value_text)).map(drop)
+}
+
+/// Returns whether the key existed.
+pub fn remove_global(section: &str, key: &str) -> std::io::Result<bool> {
+    write_entry(&global_path(), section, key, None)
 }
 
 pub fn root() -> Option<PathBuf> {
@@ -108,16 +123,20 @@ pub fn idl_path(program: &str) -> Option<PathBuf> {
 
 pub fn append_entry(section: &str, key: &str, value_text: &str) -> std::io::Result<()> {
     let Some(root) = project_root() else { return Ok(()) };
-    let path = ["patp.toml", ".patp"]
+    let path = NAMES
         .iter()
         .map(|name| root.join(name))
         .find(|path| path.is_file())
         .unwrap_or_else(|| root.join("patp.toml"));
+    write_entry(&path, section, key, Some(value_text)).map(drop)
+}
 
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
+/// Sets `key` in `[section]`, or removes it when `value_text` is None. Returns whether the key existed.
+fn write_entry(path: &Path, section: &str, key: &str, value_text: Option<&str>) -> std::io::Result<bool> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
     let header = format!("[{section}]");
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-    let entry = format!("{key} = \"{value_text}\"");
+    let mut existed = false;
 
     match lines.iter().position(|line| line.trim() == header) {
         Some(start) => {
@@ -128,25 +147,32 @@ pub fn append_entry(section: &str, key: &str, value_text: &str) -> std::io::Resu
                 .unwrap_or(lines.len());
             if let Some(existing) = lines[start + 1..end]
                 .iter()
-                .position(|line| line.trim_start().starts_with(key))
+                .position(|line| line.split('=').next().is_some_and(|k| k.trim().trim_matches('"') == key))
             {
-                lines[start + 1 + existing] = entry;
-            } else {
-                lines.insert(end, entry);
+                existed = true;
+                match value_text {
+                    Some(value) => lines[start + 1 + existing] = format!("{key} = \"{value}\""),
+                    None => drop(lines.remove(start + 1 + existing)),
+                }
+            } else if let Some(value) = value_text {
+                lines.insert(end, format!("{key} = \"{value}\""));
             }
         }
+        None if value_text.is_none() => return Ok(false),
         None => {
             if !lines.last().is_some_and(|line| line.trim().is_empty()) {
                 lines.push(String::new());
             }
             lines.push(header);
-            lines.push(entry);
+            lines.push(format!("{key} = \"{}\"", value_text.unwrap_or_default()));
         }
     }
 
-    std::fs::write(&path, format!("{}\n", lines.join("\n")))?;
-    reload();
-    Ok(())
+    if existed || value_text.is_some() {
+        std::fs::write(path, format!("{}\n", lines.join("\n")))?;
+        reload();
+    }
+    Ok(existed)
 }
 
 pub fn error_label(program: &str, code: u32) -> Option<(String, String)> {
@@ -172,4 +198,22 @@ pub fn record_flavor(program: &str, flavor: &str) {
         return;
     }
     let _ = append_entry("idl.kind", program, flavor);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn entries_are_set_replaced_and_removed_by_exact_key() {
+        let path = std::env::temp_dir().join("panic-write-entry-test.toml");
+        let _ = std::fs::remove_file(&path);
+        super::write_entry(&path, "rpc", "mainnet", Some("https://a")).unwrap();
+        super::write_entry(&path, "rpc", "main", Some("https://b")).unwrap();
+        super::write_entry(&path, "rpc", "main", Some("https://c")).unwrap();
+        assert!(!super::write_entry(&path, "rpc", "missing", None).unwrap());
+        assert!(super::write_entry(&path, "rpc", "mainnet", None).unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(super::parse(&text)["rpc"].len(), 1);
+        assert_eq!(super::parse(&text)["rpc"]["main"], "https://c");
+        let _ = std::fs::remove_file(&path);
+    }
 }

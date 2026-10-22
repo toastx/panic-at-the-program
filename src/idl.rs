@@ -65,22 +65,19 @@ fn cache_key(program: &str) -> String {
 }
 
 fn cached(cluster: &str, program: &str) -> Option<Value> {
-    match solana::load(cluster, &cache_key(program))? {
-        Value::Null => Some(Value::Null),
-        value => Some(value),
-    }
-    .filter(|value| !value.is_null())
+    solana::load(cluster, &cache_key(program)).filter(|value| !value.is_null())
 }
 
 fn fetch(cluster: &str, program: &str) -> Option<Value> {
     let addresses = candidates(program);
-    let accounts = solana::accounts_info(cluster, &addresses).ok()?;
+    let accounts = solana::accounts_info_sparse(cluster, &addresses).ok()?;
     let found = accounts
         .iter()
+        .flatten()
         .find(|account| account["owner"].as_str() == Some(program))
         .and_then(|account| account.pointer("/data/0").and_then(Value::as_str))
         .and_then(inflate_account);
-    let _ = solana::store_value(cluster, &cache_key(program), found.as_ref().unwrap_or(&Value::Null));
+    let _ = solana::store(cluster, &cache_key(program), found.as_ref().unwrap_or(&Value::Null));
     found
 }
 
@@ -327,10 +324,7 @@ fn parse_anchor_like(value: &Value, flavor: Flavor) -> Program {
 
     Program {
         flavor,
-        address: value["address"]
-            .as_str()
-            .or_else(|| value.pointer("/metadata/address").and_then(Value::as_str))
-            .map(str::to_string),
+        address: address(value),
         instructions,
         accounts,
         errors: parse_errors(value["errors"].as_array(), "msg"),
@@ -353,14 +347,7 @@ fn parse_anchor_account_spec(entry: &Value) -> AccountSpec {
             seeds
                 .iter()
                 .filter_map(|seed| match seed["kind"].as_str()? {
-                    "const" => Some(Seed::Const(
-                        seed["value"]
-                            .as_array()?
-                            .iter()
-                            .filter_map(Value::as_u64)
-                            .map(|b| b as u8)
-                            .collect(),
-                    )),
+                    "const" => bytes_field(seed, "value").map(Seed::Const),
                     "account" => Some(Seed::Account(seed["path"].as_str()?.to_string())),
                     "arg" => Some(Seed::Arg(seed["path"].as_str()?.to_string())),
                     _ => None,
@@ -383,19 +370,28 @@ fn parse_errors(list: Option<&Vec<Value>>, message_key: &str) -> Vec<ErrorDef> {
         .collect()
 }
 
+fn number_type(name: &str) -> Option<Type> {
+    Some(match name {
+        "u8" => Type::U8,
+        "u16" => Type::U16,
+        "u32" => Type::U32,
+        "u64" => Type::U64,
+        "u128" => Type::U128,
+        "i8" => Type::I8,
+        "i16" => Type::I16,
+        "i32" => Type::I32,
+        "i64" => Type::I64,
+        "i128" => Type::I128,
+        _ => return None,
+    })
+}
+
 fn anchor_type(value: &Value) -> Type {
     if let Some(name) = value.as_str() {
+        if let Some(number) = number_type(name) {
+            return number;
+        }
         return match name {
-            "u8" => Type::U8,
-            "u16" => Type::U16,
-            "u32" => Type::U32,
-            "u64" => Type::U64,
-            "u128" => Type::U128,
-            "i8" => Type::I8,
-            "i16" => Type::I16,
-            "i32" => Type::I32,
-            "i64" => Type::I64,
-            "i128" => Type::I128,
             "bool" => Type::Bool,
             "pubkey" | "publicKey" => Type::Pubkey,
             "string" => Type::Str,
@@ -471,7 +467,7 @@ fn parse_codama(value: &Value) -> Program {
                 .unwrap_or_default();
             AccountType {
                 name: entry["name"].as_str().unwrap_or_default().to_string(),
-                discriminator: codama_account_discriminator(entry, &fields),
+                discriminator: codama_discriminator(entry, &fields),
                 fields: fields
                     .iter()
                     .filter(|field| field["defaultValueStrategy"].as_str() != Some("omitted"))
@@ -541,10 +537,6 @@ fn codama_discriminator(entry: &Value, args: &[Value]) -> Vec<u8> {
     Vec::new()
 }
 
-fn codama_account_discriminator(entry: &Value, fields: &[Value]) -> Vec<u8> {
-    codama_discriminator(entry, fields)
-}
-
 fn codama_seeds(account: &Value) -> Option<Vec<Seed>> {
     let seeds = account.pointer("/defaultValue/seeds")?.as_array()?;
     Some(
@@ -561,19 +553,7 @@ fn codama_seeds(account: &Value) -> Option<Vec<Seed>> {
 
 fn codama_type(value: &Value) -> Type {
     match value["kind"].as_str().unwrap_or_default() {
-        "numberTypeNode" => match value["format"].as_str().unwrap_or_default() {
-            "u8" => Type::U8,
-            "u16" => Type::U16,
-            "u32" => Type::U32,
-            "u64" => Type::U64,
-            "u128" => Type::U128,
-            "i8" => Type::I8,
-            "i16" => Type::I16,
-            "i32" => Type::I32,
-            "i64" => Type::I64,
-            "i128" => Type::I128,
-            _ => Type::Unknown,
-        },
+        "numberTypeNode" => number_type(value["format"].as_str().unwrap_or_default()).unwrap_or(Type::Unknown),
         "booleanTypeNode" => Type::Bool,
         "publicKeyTypeNode" => Type::Pubkey,
         "stringTypeNode" => Type::Str,
@@ -614,7 +594,6 @@ pub fn error(program: &Program, code: u32) -> Option<(String, String)> {
 pub struct Decoded {
     pub name: String,
     pub args: Vec<(String, String)>,
-    pub accounts: Vec<String>,
     pub specs: Vec<AccountSpec>,
 }
 
@@ -628,7 +607,6 @@ pub fn instruction(program: &Program, data: &[u8]) -> Option<Decoded> {
     Some(Decoded {
         name: entry.name.clone(),
         args: decode_fields(&entry.args, data, &mut cursor),
-        accounts: entry.accounts.iter().map(|spec| spec.name.clone()).collect(),
         specs: entry.accounts.clone(),
     })
 }

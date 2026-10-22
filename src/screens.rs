@@ -578,7 +578,7 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
     let accounts_block = panel(&accounts_title, false).padding(Padding::horizontal(1));
     let accounts_inner = accounts_block.inner(panes[0]);
     f.render_widget(accounts_block, panes[0]);
-    let roles = decoded.map(|d| d.accounts).unwrap_or_default();
+    let roles: Vec<String> = decoded.map(|d| d.specs.into_iter().map(|spec| spec.name).collect()).unwrap_or_default();
     let items: Vec<ListItem> = node
         .accounts
         .iter()
@@ -819,19 +819,7 @@ fn compact_keys(line: &str) -> String {
 }
 
 fn call_path(tx: &crate::solana::Tx, index: usize) -> Vec<String> {
-    let mut chain = vec![index];
-    let mut depth = tx.nodes[index].depth;
-    for i in (0..index).rev() {
-        if tx.nodes[i].depth < depth {
-            chain.push(i);
-            depth = tx.nodes[i].depth;
-            if depth == 0 {
-                break;
-            }
-        }
-    }
-    chain.reverse();
-    chain.into_iter().map(|i| node_label(&tx.nodes[i])).collect()
+    tx.ancestors(index).into_iter().map(|i| node_label(&tx.nodes[i])).collect()
 }
 
 fn detail_panel(f: &mut Frame, area: Rect, app: &App) {

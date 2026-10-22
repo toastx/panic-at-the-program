@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::{App, CLUSTERS, Click};
+use crate::app::{App, Click, clusters};
 use crate::solana::{Kind, Node, Status, Tx};
 
 pub const ACCENT: Color = Color::Rgb(139, 122, 255);
@@ -32,7 +32,7 @@ pub fn chip(text: &str, color: Color) -> Span<'static> {
 }
 
 pub fn short(key: &str) -> String {
-    if let Some(label) = crate::workspace::label("accounts", key) {
+    if let Some(label) = crate::workspace::value("accounts", key) {
         return label;
     }
     if key.len() > 12 {
@@ -77,10 +77,7 @@ pub fn tree_prefixes(nodes: &[Node]) -> Vec<String> {
             .iter()
             .take_while(|n| n.depth >= node.depth)
             .any(|n| n.depth == node.depth);
-        last_at.truncate(node.depth);
-        while last_at.len() < node.depth {
-            last_at.push(true);
-        }
+        last_at.resize(node.depth, true);
         let mut prefix = String::new();
         for ancestor_last in &last_at {
             prefix.push_str(if *ancestor_last { "   " } else { "│  " });
@@ -169,20 +166,22 @@ pub fn render_topbar(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 pub fn render_cluster_menu(f: &mut Frame, app: &mut App) {
+    let clusters = clusters();
     let anchor = app.cluster_button;
-    let width = 16.min(f.area().width);
+    let longest = clusters.iter().map(|c| c.chars().count()).max().unwrap_or(0) as u16;
+    let width = (longest + 5).max(16).min(f.area().width);
     let area = Rect {
         x: anchor.x.min(f.area().width.saturating_sub(width)),
         y: anchor.y + 1,
         width,
-        height: (CLUSTERS.len() as u16 + 2).min(f.area().height.saturating_sub(anchor.y + 1)),
+        height: (clusters.len() as u16 + 2).min(f.area().height.saturating_sub(anchor.y + 1)),
     };
     f.render_widget(Clear, area);
     let block = panel("NETWORK", true);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let lines: Vec<Line> = CLUSTERS
+    let lines: Vec<Line> = clusters
         .iter()
         .enumerate()
         .map(|(i, cluster)| {
@@ -202,7 +201,7 @@ pub fn render_cluster_menu(f: &mut Frame, app: &mut App) {
         })
         .collect();
 
-    for (i, cluster) in CLUSTERS.iter().enumerate() {
+    for (i, cluster) in clusters.into_iter().enumerate() {
         let y = inner.y + i as u16;
         if y < inner.y + inner.height {
             app.push_hit(Rect { x: inner.x, y, width: inner.width, height: 1 }, Click::Cluster(cluster));
@@ -255,13 +254,8 @@ pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
             ListItem::new(Line::from(vec![
                 Span::styled(
                     match entry.status {
-                        Some(status) => {
-                            if status == crate::solana::Status::Ok {
-                                "✓ "
-                            } else {
-                                "✕ "
-                            }
-                        }
+                        Some(Status::Ok) => "✓ ",
+                        Some(Status::Failed) => "✕ ",
                         None => "· ",
                     },
                     Style::new().fg(entry.status.map_or(MUTED, status_color)),

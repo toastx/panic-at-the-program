@@ -1,11 +1,19 @@
 use std::collections::HashSet;
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::widgets::ListState;
 
 use crate::solana::{self, AccountInfo, Entry, Kind, Tx};
 
-pub const CLUSTERS: [&str; 4] = ["mainnet", "devnet", "testnet", "localnet"];
+pub const BUILTIN: [&str; 4] = ["mainnet", "devnet", "testnet", "localnet"];
+
+/// Built-in clusters, then the named endpoints from `panic rpc add`.
+pub fn clusters() -> Vec<String> {
+    let custom = crate::workspace::global("rpc").into_iter().map(|(name, _)| name);
+    let mut all: Vec<String> = BUILTIN.iter().map(|c| c.to_string()).collect();
+    all.extend(custom.filter(|name| !BUILTIN.contains(&name.as_str())));
+    all
+}
 
 #[derive(Clone, PartialEq)]
 pub enum Click {
@@ -13,7 +21,7 @@ pub enum Click {
     Entry(usize),
     Back,
     ClusterMenu,
-    Cluster(&'static str),
+    Cluster(String),
     Explorer,
     Row(usize),
     Inspect(String),
@@ -178,10 +186,7 @@ impl App {
             self.kind = location.kind;
             self.message.clear();
         } else {
-            match location.kind {
-                Kind::Tx => self.load_transaction(&location.key),
-                Kind::Account => self.load_account(&location.key),
-            }
+            self.load(location.kind, &location.key);
         }
         if self.message.is_empty() {
             self.goto(location.screen);
@@ -197,6 +202,13 @@ impl App {
     pub fn open_account(&mut self, pubkey: &str) {
         self.stack.clear();
         self.load_account(pubkey);
+    }
+
+    pub fn load(&mut self, kind: Kind, key: &str) {
+        match kind {
+            Kind::Tx => self.load_transaction(key),
+            Kind::Account => self.load_account(key),
+        }
     }
 
     fn load_transaction(&mut self, signature: &str) {
@@ -249,14 +261,15 @@ impl App {
     }
 
     pub fn step_cluster(&mut self, delta: isize) {
-        let current = CLUSTERS.iter().position(|c| *c == self.cluster).unwrap_or(0) as isize;
-        let next = (current + delta).rem_euclid(CLUSTERS.len() as isize) as usize;
-        self.set_cluster(CLUSTERS[next]);
+        let clusters = clusters();
+        let current = clusters.iter().position(|c| *c == self.cluster).unwrap_or(0) as isize;
+        let next = (current + delta).rem_euclid(clusters.len() as isize) as usize;
+        self.set_cluster(&clusters[next]);
     }
 
     pub fn toggle_cluster_menu(&mut self) {
         self.cluster_menu = !self.cluster_menu;
-        self.cluster_index = CLUSTERS.iter().position(|c| *c == self.cluster).unwrap_or(0);
+        self.cluster_index = clusters().iter().position(|c| *c == self.cluster).unwrap_or(0);
     }
 
     pub fn set_cluster(&mut self, cluster: &str) {
@@ -267,25 +280,14 @@ impl App {
         self.cluster = cluster.to_string();
         self.message.clear();
         self.refresh_history();
-        match self.kind {
-            Kind::Tx => {
-                if let Some(signature) = self.tx().map(|tx| tx.signature.clone()) {
-                    self.load_transaction(&signature);
-                }
-            }
-            Kind::Account => {
-                if let Some(key) = self.account.as_ref().map(|a| a.key.clone()) {
-                    self.load_account(&key);
-                }
-            }
+        if let Some(key) = self.loaded_key() {
+            self.load(self.kind, &key);
         }
     }
 
     pub fn explorer_target(&self) -> Option<(String, String)> {
-        match self.kind {
-            Kind::Account => self.account.as_ref().map(|a| ("address".to_string(), a.key.clone())),
-            Kind::Tx => self.tx().map(|tx| ("tx".to_string(), tx.signature.clone())),
-        }
+        let kind = if self.kind == Kind::Tx { "tx" } else { "address" };
+        self.loaded_key().map(|key| (kind.to_string(), key))
     }
 
     pub fn open_in_explorer(&mut self) {
@@ -294,23 +296,28 @@ impl App {
             return;
         };
         let url = solana::explorer_url(&self.cluster, &kind, &key);
-        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-        match std::process::Command::new(opener).arg(&url).spawn() {
+        // rundll32, not `cmd /c start`: cmd would split the URL at `&`.
+        let mut opener = match std::env::consts::OS {
+            "macos" => std::process::Command::new("open"),
+            "windows" => {
+                let mut command = std::process::Command::new("rundll32");
+                command.arg("url.dll,FileProtocolHandler");
+                command
+            }
+            _ => std::process::Command::new("xdg-open"),
+        };
+        match opener.arg(&url).spawn() {
             Ok(_) => self.message = format!("opened {url}"),
             Err(err) => self.message = format!("{err}: {url}"),
         }
     }
 
     pub fn click(&mut self, column: u16, row: u16) {
-        let point = (column, row);
         let hit = self
             .hits
             .iter()
             .rev()
-            .find(|hit| {
-                let a = hit.area;
-                point.0 >= a.x && point.0 < a.x + a.width && point.1 >= a.y && point.1 < a.y + a.height
-            })
+            .find(|hit| hit.area.contains(Position::new(column, row)))
             .map(|hit| hit.click.clone());
         match hit {
             Some(Click::Workspace(screen)) => {
@@ -319,7 +326,7 @@ impl App {
             }
             Some(Click::Back) => self.back_to_entities(),
             Some(Click::ClusterMenu) => self.toggle_cluster_menu(),
-            Some(Click::Cluster(cluster)) => self.set_cluster(cluster),
+            Some(Click::Cluster(cluster)) => self.set_cluster(&cluster),
             Some(Click::Explorer) => self.open_in_explorer(),
             Some(Click::Row(index)) => {
                 self.focus_nav = false;
@@ -475,16 +482,12 @@ impl App {
         let Some(entry) = self.entries.get(index) else { return };
         self.entry_index = index;
         let (kind, key) = (entry.kind, entry.key.clone());
-        match kind {
-            Kind::Tx => self.open_transaction(&key),
-            Kind::Account => self.open_account(&key),
-        }
+        self.stack.clear();
+        self.load(kind, &key);
     }
 
     pub fn parent_node(&self, index: usize) -> Option<usize> {
-        let tx = self.tx()?;
-        let depth = tx.nodes.get(index)?.depth;
-        (0..index).rev().find(|&i| tx.nodes[i].depth < depth)
+        self.tx()?.ancestors(index).iter().rev().nth(1).copied()
     }
 
     pub fn default_row(&self) -> usize {
@@ -574,37 +577,23 @@ impl App {
         self.search.is_empty() || text.to_lowercase().contains(&self.search.to_lowercase())
     }
 
+    fn filtered<T>(items: &[T], hit: impl Fn(&T) -> bool) -> Vec<usize> {
+        items.iter().enumerate().filter(|(_, item)| hit(item)).map(|(i, _)| i).collect()
+    }
+
     pub fn account_rows(&self) -> Vec<usize> {
-        self.tx().map_or(Vec::new(), |tx| {
-            tx.accounts
-                .iter()
-                .enumerate()
-                .filter(|(_, a)| self.matches(&a.key) || self.matches(a.role()))
-                .map(|(i, _)| i)
-                .collect()
-        })
+        let accounts = self.tx().map_or(&[][..], |tx| &tx.accounts);
+        Self::filtered(accounts, |a| self.matches(&a.key) || self.matches(a.role()))
     }
 
     pub fn balance_rows(&self) -> Vec<usize> {
-        self.tx().map_or(Vec::new(), |tx| {
-            tx.balances
-                .iter()
-                .enumerate()
-                .filter(|(_, b)| self.matches(&b.key) || self.matches(&b.label))
-                .map(|(i, _)| i)
-                .collect()
-        })
+        let balances = self.tx().map_or(&[][..], |tx| &tx.balances);
+        Self::filtered(balances, |b| self.matches(&b.key) || self.matches(&b.label))
     }
 
     pub fn log_rows(&self) -> Vec<usize> {
-        self.tx().map_or(Vec::new(), |tx| {
-            tx.logs
-                .iter()
-                .enumerate()
-                .filter(|(_, line)| self.matches(line))
-                .map(|(i, _)| i)
-                .collect()
-        })
+        let logs = self.tx().map_or(&[][..], |tx| &tx.logs);
+        Self::filtered(logs, |line| self.matches(line))
     }
 
     pub fn node_matches(&self, index: usize) -> bool {

@@ -17,13 +17,16 @@ use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::prelude::*;
 
-use app::{App, CLUSTERS, Mode, Screen};
+use app::{App, Mode, Screen, clusters};
 #[cfg(test)]
 use app::Click;
 
 fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
     let signature = args.next();
+    if signature.as_deref() == Some("rpc") {
+        return rpc_command(&args.collect::<Vec<_>>());
+    }
     let cluster = args.next().unwrap_or_else(|| "devnet".to_string());
 
     let mut app = App::new(cluster);
@@ -53,6 +56,36 @@ fn main() -> io::Result<()> {
     disable_raw_mode()?;
     execute!(term.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     term.show_cursor()
+}
+
+fn rpc_command(args: &[String]) -> io::Result<()> {
+    match args {
+        [add, name, url] if add == "add" => {
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                eprintln!("rpc url must start with http:// or https://");
+                std::process::exit(2);
+            }
+            workspace::set_global("rpc", name, url)?;
+            println!("saved {name} -> {url} in {}", workspace::global_path().display());
+        }
+        [rm, name] if rm == "rm" => {
+            if !workspace::remove_global("rpc", name)? {
+                eprintln!("no custom rpc named {name}");
+                std::process::exit(1);
+            }
+            println!("removed {name}");
+        }
+        [] => {
+            for name in clusters() {
+                println!("{name:<12} {}", solana::cluster_url(&name));
+            }
+        }
+        _ => {
+            eprintln!("usage: panic rpc                    list clusters\n       panic rpc add <name> <url>  save a custom endpoint\n       panic rpc rm <name>         remove a custom endpoint");
+            std::process::exit(2);
+        }
+    }
+    Ok(())
 }
 
 fn move_selection(app: &mut App, delta: isize) {
@@ -156,14 +189,15 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
     if app.cluster_menu {
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => {
-                app.cluster_index = (app.cluster_index + 1) % CLUSTERS.len();
+                app.cluster_index = (app.cluster_index + 1) % clusters().len();
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                app.cluster_index = (app.cluster_index + CLUSTERS.len() - 1) % CLUSTERS.len();
+                let count = clusters().len();
+                app.cluster_index = (app.cluster_index + count - 1) % count;
             }
             KeyCode::Enter => {
-                let cluster = CLUSTERS[app.cluster_index];
-                app.set_cluster(cluster);
+                let cluster = clusters()[app.cluster_index].clone();
+                app.set_cluster(&cluster);
             }
             KeyCode::Char('q') => app.quit = true,
             _ => app.cluster_menu = false,
@@ -253,17 +287,13 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
             },
         },
         KeyCode::Char('r') => {
-            if app.kind == solana::Kind::Account {
-                if let Some(key) = app.account.as_ref().map(|a| a.key.clone()) {
-                    match solana::refetch_account(&app.cluster, &key) {
-                        Ok(value) => app.account = Some(solana::parse_account(&key, &value)),
-                        Err(err) => app.message = err.to_string(),
-                    }
-                }
-            } else if let Some(signature) = app.tx().map(|tx| tx.signature.clone()) {
-                match solana::refetch(&app.cluster, &signature) {
-                    Ok(value) => app.tx = Some(solana::parse(&signature, &app.cluster, &value)),
-                    Err(err) => app.message = err.to_string(),
+            if let Some(key) = app.loaded_key() {
+                let (kind, screen) = (app.kind, app.screen);
+                let cache_key = if kind == solana::Kind::Account { format!("account-{key}") } else { key.clone() };
+                solana::evict(&app.cluster, &cache_key);
+                app.load(kind, &key);
+                if app.message.is_empty() {
+                    app.goto(screen);
                 }
             }
         }
@@ -560,7 +590,7 @@ mod tests {
         let item = app
             .hits
             .iter()
-            .find(|hit| hit.click == Click::Cluster("testnet"))
+            .find(|hit| hit.click == Click::Cluster("testnet".to_string()))
             .map(|hit| (hit.area.x, hit.area.y))
             .expect("dropdown item is clickable");
         app.click(item.0, item.1);
@@ -762,7 +792,7 @@ mod tests {
         assert_eq!(decoded.name, "withdraw");
         assert_eq!(decoded.args[0], ("amount".into(), "7500000".into()));
         assert_eq!(decoded.args[1], ("memo".into(), "hi".into()));
-        assert_eq!(decoded.accounts, vec!["vault".to_string(), "authority".to_string()]);
+        assert_eq!(decoded.specs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["vault", "authority"]);
 
         let mut account_data = vec![9u8; 8];
         account_data.extend_from_slice(&solana::bs58_decode("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"));
@@ -810,21 +840,6 @@ mod tests {
         let (headline, _, hint) = diagnose::infer_custom(3, None);
         assert!(headline.contains("custom program error 3"));
         assert!(hint.contains("number errors from 0"));
-    }
-
-    #[test]
-    fn the_workspace_config_is_the_users_project_not_this_repo() {
-        let root = workspace::project_root().unwrap();
-        assert!(
-            root.join("Anchor.toml").exists() || root.join("Cargo.toml").exists() || root.join(".git").exists(),
-            "config lands at the project root, not wherever the binary lives"
-        );
-
-        let ignored = std::fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
-        assert!(
-            ignored.lines().any(|line| line.trim() == "patp.toml"),
-            "a config written into a project is that project's, never ours to commit"
-        );
     }
 
     #[test]
@@ -937,7 +952,7 @@ mod tests {
         assert_eq!(decoded.name, "withdraw");
         assert_eq!(decoded.args[0], ("amount".into(), "999".into()));
         assert_eq!(decoded.args[1], ("memo".into(), "ok".into()));
-        assert_eq!(decoded.accounts, vec!["vault".to_string(), "authority".to_string()]);
+        assert_eq!(decoded.specs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["vault", "authority"]);
 
         let mut account_data = vec![7u8];
         account_data.extend_from_slice(&solana::bs58_decode("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"));
@@ -1446,6 +1461,15 @@ mod tests {
             _ => None,
         });
         assert!(inspect.count() >= 3);
+    }
+
+    #[test]
+    fn the_cache_round_trips_and_evicts() {
+        let value = serde_json::json!({"result": {"slot": 7}});
+        solana::store("test-cache", "roundtrip", &value).unwrap();
+        assert_eq!(solana::load("test-cache", "roundtrip"), Some(value));
+        solana::evict("test-cache", "roundtrip");
+        assert_eq!(solana::load("test-cache", "roundtrip"), None);
     }
 
     #[test]

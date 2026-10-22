@@ -83,7 +83,10 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
     let node = nodes
         .iter()
         .rposition(|n| n.status == Status::Failed)
-        .or_else(|| instruction.and_then(|index| top_level(nodes).get(index).copied()));
+        .or_else(|| {
+            let index = instruction?;
+            nodes.iter().enumerate().filter(|(_, n)| n.depth == 0).nth(index).map(|(i, _)| i)
+        });
     let program = node.map(|i| nodes[i].program.as_str()).unwrap_or_default();
     let (mut headline, mut meaning) = describe(&code, program);
 
@@ -111,11 +114,6 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
             if !missing.is_empty() {
                 checks.push(format!("no signature from: {}", missing.join(", ")));
             }
-        }
-        if name == "ComputeBudgetExceeded" || name == "ProgramFailedToComplete" {
-            checks.push(format!(
-                "consumed {cu} of {cu_limit} compute units — raise the limit with ComputeBudget"
-            ));
         }
     }
     if let Code::Custom(n) = code {
@@ -216,15 +214,6 @@ pub fn rules(code: &Code, headline: &str, logs: &[String], cu: u32, cu_limit: u3
     }
 
     out
-}
-
-fn top_level(nodes: &[Node]) -> Vec<usize> {
-    nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, n)| n.depth == 0)
-        .map(|(i, _)| i)
-        .collect()
 }
 
 fn classify(err: &Value) -> Option<(Option<usize>, Code)> {

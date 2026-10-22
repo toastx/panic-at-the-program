@@ -62,11 +62,11 @@ pub struct Tx {
 }
 
 fn cache_dir() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/panic")
+    crate::workspace::home().join(".cache/panic")
 }
 
 fn cache_path(cluster: &str, key: &str) -> PathBuf {
-    cache_dir().join(cluster).join(format!("{key}.json.zst"))
+    cache_dir().join(cluster).join(format!("{key}.json.z"))
 }
 
 pub fn cached(cluster: &str) -> Vec<String> {
@@ -76,7 +76,7 @@ pub fn cached(cluster: &str) -> Vec<String> {
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().into_string().ok()?;
-            let key = name.strip_suffix(".json.zst")?.to_string();
+            let key = name.strip_suffix(".json.z")?.to_string();
             Some((e.metadata().ok()?.modified().ok()?, key))
         })
         .collect();
@@ -137,20 +137,20 @@ pub fn entries(cluster: &str) -> Vec<Entry> {
 }
 
 pub fn load(cluster: &str, key: &str) -> Option<Value> {
-    let bytes = fs::read(cache_path(cluster, key)).ok()?;
-    serde_json::from_slice(&zstd::decode_all(&bytes[..]).ok()?).ok()
+    let file = fs::File::open(cache_path(cluster, key)).ok()?;
+    serde_json::from_reader(flate2::read::ZlibDecoder::new(file)).ok()
 }
 
-fn store(cluster: &str, key: &str, value: &Value) -> io::Result<()> {
+pub fn store(cluster: &str, key: &str, value: &Value) -> io::Result<()> {
     let path = cache_path(cluster, key);
     fs::create_dir_all(path.parent().unwrap_or(&cache_dir()))?;
-    let raw = serde_json::to_vec(value)?;
-    fs::write(path, zstd::encode_all(&raw[..], 19)?)
+    let mut encoder = flate2::write::ZlibEncoder::new(fs::File::create(path)?, flate2::Compression::best());
+    serde_json::to_writer(&mut encoder, value)?;
+    encoder.finish().map(drop)
 }
 
-pub fn refetch(cluster: &str, signature: &str) -> Result<Value, Box<dyn Error>> {
-    let _ = fs::remove_file(cache_path(cluster, signature));
-    fetch(cluster, signature)
+pub fn evict(cluster: &str, key: &str) {
+    let _ = fs::remove_file(cache_path(cluster, key));
 }
 
 fn rpc(cluster: &str, method: &str, params: Value) -> Result<Value, Box<dyn Error>> {
@@ -197,16 +197,15 @@ impl Tx {
     }
 
     pub fn failure_path(&self) -> Vec<usize> {
-        let Some(failed) = self.failed_node else { return Vec::new() };
-        let mut path = vec![failed];
-        let mut depth = self.nodes[failed].depth;
-        for i in (0..failed).rev() {
-            if self.nodes[i].depth < depth {
+        self.failed_node.map(|failed| self.ancestors(failed)).unwrap_or_default()
+    }
+
+    /// Call chain from the top-level instruction down to `index`, inclusive.
+    pub fn ancestors(&self, index: usize) -> Vec<usize> {
+        let mut path = vec![index];
+        for i in (0..index).rev() {
+            if self.nodes[i].depth < self.nodes[path[path.len() - 1]].depth {
                 path.push(i);
-                depth = self.nodes[i].depth;
-                if depth == 0 {
-                    break;
-                }
             }
         }
         path.reverse();
@@ -215,6 +214,9 @@ impl Tx {
 }
 
 pub fn cluster_url(name: &str) -> String {
+    if let Some((_, url)) = crate::workspace::global("rpc").into_iter().find(|(key, _)| key == name) {
+        return url;
+    }
     match name {
         "mainnet" => "https://api.mainnet-beta.solana.com".to_string(),
         "devnet" => "https://api.devnet.solana.com".to_string(),
@@ -229,7 +231,7 @@ pub fn explorer_url(cluster: &str, kind: &str, key: &str) -> String {
         "mainnet" => String::new(),
         "devnet" | "testnet" => format!("?cluster={cluster}"),
         "localnet" => "?cluster=custom&customUrl=http%3A%2F%2F127.0.0.1%3A8899".to_string(),
-        url => format!("?cluster=custom&customUrl={}", urlencode(url)),
+        name => format!("?cluster=custom&customUrl={}", urlencode(&cluster_url(name))),
     };
     format!("https://explorer.solana.com/{kind}/{key}{suffix}")
 }
@@ -245,7 +247,7 @@ fn urlencode(input: &str) -> String {
 }
 
 fn program_name(id: &str) -> String {
-    if let Some(label) = crate::workspace::label("programs", id) {
+    if let Some(label) = crate::workspace::value("programs", id) {
         return label;
     }
     match id {
@@ -438,10 +440,7 @@ pub fn parse(signature: &str, cluster: &str, value: &Value) -> Tx {
                     .and_then(|list| list.get(i).cloned())
             };
 
-            counters.truncate(depth);
-            while counters.len() < depth {
-                counters.push(0);
-            }
+            counters.resize(depth, 0);
             counters[depth - 1] += 1;
             let path = counters.iter().map(usize::to_string).collect::<Vec<_>>().join(".");
 
@@ -578,15 +577,6 @@ pub fn fetch_account(cluster: &str, pubkey: &str) -> Result<Value, Box<dyn Error
     Ok(value)
 }
 
-pub fn accounts_info(cluster: &str, addresses: &[String]) -> Result<Vec<Value>, Box<dyn Error>> {
-    let value = rpc(cluster, "getMultipleAccounts", json!([addresses, {"encoding": "base64"}]))?;
-    Ok(value
-        .pointer("/result/value")
-        .and_then(Value::as_array)
-        .map(|list| list.iter().filter(|v| !v.is_null()).cloned().collect())
-        .unwrap_or_default())
-}
-
 pub fn accounts_info_sparse(cluster: &str, addresses: &[String]) -> Result<Vec<Option<Value>>, Box<dyn Error>> {
     let value = rpc(cluster, "getMultipleAccounts", json!([addresses, {"encoding": "base64"}]))?;
     Ok(value
@@ -603,15 +593,6 @@ pub fn accounts_info_sparse(cluster: &str, addresses: &[String]) -> Result<Vec<O
 pub fn minimum_balance(cluster: &str, size: usize) -> Result<u64, Box<dyn Error>> {
     let value = rpc(cluster, "getMinimumBalanceForRentExemption", json!([size]))?;
     value["result"].as_u64().ok_or_else(|| "no result".into())
-}
-
-pub fn store_value(cluster: &str, key: &str, value: &Value) -> io::Result<()> {
-    store(cluster, key, value)
-}
-
-pub fn refetch_account(cluster: &str, pubkey: &str) -> Result<Value, Box<dyn Error>> {
-    let _ = fs::remove_file(cache_path(cluster, &format!("account-{pubkey}")));
-    fetch_account(cluster, pubkey)
 }
 
 pub fn parse_account(pubkey: &str, value: &Value) -> AccountInfo {
