@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::io::Read;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use curve25519_dalek::edwards::CompressedEdwardsY;
 use serde_json::Value;
@@ -119,7 +119,9 @@ pub fn find_program_address(seeds: &[&[u8]], program: &[u8]) -> Option<([u8; 32]
 
 fn candidates(program: &str) -> Vec<String> {
     let bytes = bs58_decode(program);
-    let Some((base, _)) = find_program_address(&[], &bytes) else { return Vec::new() };
+    let Some((base, _)) = find_program_address(&[], &bytes) else {
+        return Vec::new();
+    };
     vec![bs58_encode(&sha256(&[&base, b"anchor:idl", &bytes]))]
 }
 
@@ -314,8 +316,7 @@ fn parse_anchor_like(value: &Value, flavor: Flavor) -> Program {
         .map(|entry| {
             let name = entry["name"].as_str().unwrap_or_default().to_string();
             AccountType {
-                discriminator: bytes_field(entry, "discriminator")
-                    .unwrap_or_else(|| sighash("account", &name)),
+                discriminator: bytes_field(entry, "discriminator").unwrap_or_else(|| sighash("account", &name)),
                 fields: fields_for(entry, &name),
                 name,
             }
@@ -332,12 +333,7 @@ fn parse_anchor_like(value: &Value, flavor: Flavor) -> Program {
 }
 
 fn parse_anchor_account_spec(entry: &Value) -> AccountSpec {
-    let flag = |new: &str, old: &str| {
-        entry[new]
-            .as_bool()
-            .or_else(|| entry[old].as_bool())
-            .unwrap_or(false)
-    };
+    let flag = |new: &str, old: &str| entry[new].as_bool().or_else(|| entry[old].as_bool()).unwrap_or(false);
     AccountSpec {
         name: entry["name"].as_str().unwrap_or_default().to_string(),
         signer: flag("signer", "isSigner"),
@@ -439,7 +435,10 @@ fn parse_codama(value: &Value) -> Program {
                         name: account["name"].as_str().unwrap_or_default().to_string(),
                         signer: !matches!(account["isSigner"].as_bool(), Some(false) | None),
                         writable: account["isWritable"].as_bool().unwrap_or(false),
-                        address: account.pointer("/defaultValue/publicKey").and_then(Value::as_str).map(str::to_string),
+                        address: account
+                            .pointer("/defaultValue/publicKey")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
                         seeds: codama_seeds(account),
                     })
                     .collect(),
@@ -520,10 +519,10 @@ fn codama_discriminator(entry: &Value, args: &[Value]) -> Vec<u8> {
         match discriminator["kind"].as_str() {
             Some("fieldDiscriminatorNode") => {
                 let name = discriminator["name"].as_str().unwrap_or_default();
-                if let Some(arg) = args.iter().find(|arg| arg["name"].as_str() == Some(name)) {
-                    if let Some(bytes) = codama_value_bytes(&arg["defaultValue"], &codama_type(&arg["type"])) {
-                        return bytes;
-                    }
+                if let Some(arg) = args.iter().find(|arg| arg["name"].as_str() == Some(name))
+                    && let Some(bytes) = codama_value_bytes(&arg["defaultValue"], &codama_type(&arg["type"]))
+                {
+                    return bytes;
                 }
             }
             Some("constantDiscriminatorNode") => {
@@ -571,7 +570,6 @@ fn codama_type(value: &Value) -> Type {
         _ => Type::Unknown,
     }
 }
-
 
 #[cfg(test)]
 pub fn account_specs(value: &Value) -> Vec<AccountSpec> {
@@ -636,7 +634,11 @@ fn decode_fields(fields: &[Field], data: &[u8], cursor: &mut usize) -> Vec<(Stri
 }
 
 fn sighash(namespace: &str, name: &str) -> Vec<u8> {
-    let subject = if namespace == "global" { snake_case(name) } else { name.to_string() };
+    let subject = if namespace == "global" {
+        snake_case(name)
+    } else {
+        name.to_string()
+    };
     sha256(&[format!("{namespace}:{subject}").as_bytes()])[..8].to_vec()
 }
 
@@ -707,12 +709,16 @@ fn hex(bytes: &[u8]) -> String {
 pub fn enrich(tx: &mut solana::Tx) {
     let cluster = tx.cluster.clone();
     let (cu, limit) = (tx.cu, tx.cu_limit);
-    let Some(node) = tx.failure.as_ref().and_then(|failure| failure.node) else { return };
+    let Some(node) = tx.failure.as_ref().and_then(|failure| failure.node) else {
+        return;
+    };
     let program = tx.nodes[node].program.clone();
     let logs = tx.logs[tx.nodes[node].logs.clone()].to_vec();
     let parsed = idl(&cluster, &program);
     let Some(failure) = tx.failure.as_mut() else { return };
-    let crate::diagnose::Code::Custom(code) = failure.code else { return };
+    let crate::diagnose::Code::Custom(code) = failure.code else {
+        return;
+    };
 
     let named = crate::workspace::error_label(&program, code)
         .map(|(name, message)| (name, message, "patp.toml".to_string()))

@@ -45,9 +45,6 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
-    # advisory until the tree is clean: `cargo fmt --all` and `cargo clippy --fix`
-    # then delete the next line to make style a hard gate
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 

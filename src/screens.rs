@@ -58,7 +58,10 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(" /", Style::new().fg(ACCENT).bold()),
             Span::raw(app.search.clone()),
             Span::styled("▏", Style::new().fg(ACCENT)),
-            Span::styled(format!("  {} match(es)  Enter keep · Esc clear", app.match_count()), muted()),
+            Span::styled(
+                format!("  {} match(es)  Enter keep · Esc clear", app.match_count()),
+                muted(),
+            ),
         ]),
         Mode::Open(input) => Line::from(vec![
             Span::styled(" signature › ", Style::new().fg(ACCENT).bold()),
@@ -125,13 +128,8 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
     };
 
     let path = tx.failure_path();
-    let mut movers: Vec<&crate::solana::BalanceChange> =
-        tx.balances.iter().filter(|b| b.before != b.after).collect();
-    movers.sort_by(|a, b| {
-        (b.after - b.before)
-            .abs()
-            .total_cmp(&(a.after - a.before).abs())
-    });
+    let mut movers: Vec<&crate::solana::BalanceChange> = tx.balances.iter().filter(|b| b.before != b.after).collect();
+    movers.sort_by(|a, b| (b.after - b.before).abs().total_cmp(&(a.after - a.before).abs()));
     movers.truncate(3);
     let path_height = if path.is_empty() {
         0
@@ -165,11 +163,19 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
     };
     let detail = match (&tx.failure, &tx.error, tx.failed_node.and_then(|i| tx.nodes.get(i))) {
         (Some(failure), _, Some(node)) => {
-            format!("Instruction {} · {} · {}", node.path, node_label(node), failure.headline)
+            format!(
+                "Instruction {} · {} · {}",
+                node.path,
+                node_label(node),
+                failure.headline
+            )
         }
         (_, Some(error), Some(node)) => format!("Instruction {} · {} · {}", node.path, node_label(node), error),
         (_, Some(error), None) => error.clone(),
-        _ => format!("{} instructions executed", tx.nodes.iter().filter(|n| n.depth == 0).count()),
+        _ => format!(
+            "{} instructions executed",
+            tx.nodes.iter().filter(|n| n.depth == 0).count()
+        ),
     };
     f.render_widget(
         Paragraph::new(vec![
@@ -190,7 +196,10 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
     );
 
     let tiles = [
-        (tx.nodes.iter().filter(|n| n.depth == 0).count().to_string(), "Instructions"),
+        (
+            tx.nodes.iter().filter(|n| n.depth == 0).count().to_string(),
+            "Instructions",
+        ),
         (tx.accounts.len().to_string(), "Accounts"),
         (format!("{:.1}k", tx.cu as f64 / 1000.0), "Compute units"),
         (format!("{:.6}", tx.fee as f64 / 1e9), "Fee in SOL"),
@@ -232,7 +241,10 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
                 Span::styled("   instruction ", muted()),
                 Span::styled(node.path.clone(), Style::new().fg(Color::White).bold()),
                 Span::styled("  ", muted()),
-                Span::styled(call_path(tx, failed).join("  →  "), Style::new().fg(Color::Rgb(233, 164, 170))),
+                Span::styled(
+                    call_path(tx, failed).join("  →  "),
+                    Style::new().fg(Color::Rgb(233, 164, 170)),
+                ),
             ]));
         }
         if let Some(failure) = &tx.failure {
@@ -360,7 +372,11 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
             }
             spans.push(Span::styled(
                 format!("  {} CU", thousands(node.self_cu as u64)),
-                Style::new().fg(if node.self_cu > 0 { Color::Rgb(96, 165, 250) } else { MUTED }),
+                Style::new().fg(if node.self_cu > 0 {
+                    Color::Rgb(96, 165, 250)
+                } else {
+                    MUTED
+                }),
             ));
             if is_failure {
                 let message = tx
@@ -393,7 +409,7 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
     let block = panel("EXECUTION FLOW", !app.focus_nav);
     let inner = block.inner(rows[0]);
     f.render_widget(block, rows[0]);
-    let mut state = app.list.clone();
+    let mut state = app.list;
     state.select(Some(selected_index.min(visible.len().saturating_sub(1))));
     f.render_stateful_widget(
         List::new(items).highlight_style(Style::new().bg(Color::Rgb(48, 48, 72))),
@@ -406,7 +422,10 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
-    let Some(index) = app.node_index.filter(|i| app.tx().is_some_and(|tx| *i < tx.nodes.len())) else {
+    let Some(index) = app
+        .node_index
+        .filter(|i| app.tx().is_some_and(|tx| *i < tx.nodes.len()))
+    else {
         let _ = require_tx(f, area, app, "INSTRUCTION");
         f.render_widget(
             wrapped("  select an invocation in the Execution tree and press Enter", muted()),
@@ -428,7 +447,11 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(block, area);
 
     let error_height = if failed {
-        3 + tx.failure.as_ref().filter(|f| f.node == Some(index)).map_or(0, |f| f.checks.len() as u16)
+        3 + tx
+            .failure
+            .as_ref()
+            .filter(|f| f.node == Some(index))
+            .map_or(0, |f| f.checks.len() as u16)
     } else {
         0
     };
@@ -443,7 +466,10 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(node_label(node), Style::new().fg(Color::White).bold()),
-            Span::styled(format!("   {} inner call(s)   depth {}", node.children, node.depth), muted()),
+            Span::styled(
+                format!("   {} inner call(s)   depth {}", node.children, node.depth),
+                muted(),
+            ),
             Span::raw("   "),
             chip(if failed { "✕ failed" } else { "✓ ok" }, status_color(node.status)),
         ])),
@@ -455,14 +481,24 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
             Span::styled("Call path   ", muted()),
             Span::styled(
                 call_path(tx, index).join("  →  "),
-                Style::new().fg(if path.contains(&index) { BAD } else { Color::Rgb(176, 180, 210) }),
+                Style::new().fg(if path.contains(&index) {
+                    BAD
+                } else {
+                    Color::Rgb(176, 180, 210)
+                }),
             ),
         ]),
         Line::from(vec![
             Span::styled("Compute     ", muted()),
-            Span::styled(format!("{:>9}", thousands(node.self_cu as u64)), Style::new().fg(ACCENT).bold()),
+            Span::styled(
+                format!("{:>9}", thousands(node.self_cu as u64)),
+                Style::new().fg(ACCENT).bold(),
+            ),
             Span::styled(" self", muted()),
-            Span::styled(format!("{:>12}", thousands(node.cu as u64)), Style::new().fg(Color::Rgb(176, 180, 210))),
+            Span::styled(
+                format!("{:>12}", thousands(node.cu as u64)),
+                Style::new().fg(Color::Rgb(176, 180, 210)),
+            ),
             Span::styled(" inclusive", muted()),
             Span::styled(
                 format!("   {:.1}% of transaction", node.cu as f64 / tx.cu.max(1) as f64 * 100.0),
@@ -491,29 +527,30 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
             ),
         ]));
     } else {
-    match crate::solana::decode_instruction(&node.program, &node.data) {
-        Some((name, fields)) => facts.push(Line::from(vec![
-            Span::styled("Data        ", muted()),
-            Span::styled(name, Style::new().fg(Color::Rgb(96, 165, 250)).bold()),
-            Span::styled(
-                fields.iter().skip(1).map(|(k, v)| format!("   {k} {v}")).collect::<String>(),
-                Style::new().fg(Color::Rgb(176, 180, 210)),
-            ),
-        ])),
-        None if !node.data.is_empty() => facts.push(Line::from(vec![
-            Span::styled("Data        ", muted()),
-            Span::styled(format!("{}  (base58, no decoder)", short(&node.data)), muted()),
-        ])),
-        None => {}
-    }
+        match crate::solana::decode_instruction(&node.program, &node.data) {
+            Some((name, fields)) => facts.push(Line::from(vec![
+                Span::styled("Data        ", muted()),
+                Span::styled(name, Style::new().fg(Color::Rgb(96, 165, 250)).bold()),
+                Span::styled(
+                    fields
+                        .iter()
+                        .skip(1)
+                        .map(|(k, v)| format!("   {k} {v}"))
+                        .collect::<String>(),
+                    Style::new().fg(Color::Rgb(176, 180, 210)),
+                ),
+            ])),
+            None if !node.data.is_empty() => facts.push(Line::from(vec![
+                Span::styled("Data        ", muted()),
+                Span::styled(format!("{}  (base58, no decoder)", short(&node.data)), muted()),
+            ])),
+            None => {}
+        }
     }
     f.render_widget(Paragraph::new(facts), rows[1]);
 
     if failed {
-        let diagnosed = tx
-            .failure
-            .as_ref()
-            .filter(|failure| failure.node == Some(index));
+        let diagnosed = tx.failure.as_ref().filter(|failure| failure.node == Some(index));
         let headline = match diagnosed {
             Some(failure) => failure.headline.clone(),
             None => node.error.clone().or_else(|| tx.error.clone()).unwrap_or_default(),
@@ -548,13 +585,23 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
                 let mut spans = vec![
                     Span::styled(format!("{glyph} "), Style::new().fg(color)),
                     Span::styled(
-                        format!("{:<20.19} ", if finding.role.is_empty() { short(&finding.key) } else { finding.role.clone() }),
+                        format!(
+                            "{:<20.19} ",
+                            if finding.role.is_empty() {
+                                short(&finding.key)
+                            } else {
+                                finding.role.clone()
+                            }
+                        ),
                         Style::new().fg(Color::Rgb(96, 165, 250)),
                     ),
                     Span::styled(finding.message.clone(), Style::new().fg(Color::Rgb(176, 180, 210))),
                 ];
                 if let (Some(expected), Some(actual)) = (&finding.expected, &finding.actual) {
-                    spans.push(Span::styled(format!("  expected {}", short(expected)), Style::new().fg(OK)));
+                    spans.push(Span::styled(
+                        format!("  expected {}", short(expected)),
+                        Style::new().fg(OK),
+                    ));
                     spans.push(Span::styled(format!("  got {}", short(actual)), Style::new().fg(BAD)));
                 }
                 Line::from(spans)
@@ -578,7 +625,9 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
     let accounts_block = panel(&accounts_title, false).padding(Padding::horizontal(1));
     let accounts_inner = accounts_block.inner(panes[0]);
     f.render_widget(accounts_block, panes[0]);
-    let roles: Vec<String> = decoded.map(|d| d.specs.into_iter().map(|spec| spec.name).collect()).unwrap_or_default();
+    let roles: Vec<String> = decoded
+        .map(|d| d.specs.into_iter().map(|spec| spec.name).collect())
+        .unwrap_or_default();
     let items: Vec<ListItem> = node
         .accounts
         .iter()
@@ -653,8 +702,10 @@ fn render_sections(f: &mut Frame, area: Rect, app: &mut App) {
     let visible_rows = ((area.height / card_height) as usize).clamp(1, rows);
     let selected_row = selected / columns;
     let first_row = selected_row.saturating_sub(visible_rows - 1).min(rows - visible_rows);
-    let row_areas = Layout::vertical(vec![Constraint::Length(card_height); visible_rows])
-        .split(Rect { height: visible_rows as u16 * card_height, ..area });
+    let row_areas = Layout::vertical(vec![Constraint::Length(card_height); visible_rows]).split(Rect {
+        height: visible_rows as u16 * card_height,
+        ..area
+    });
 
     let mut hits: Vec<(Rect, usize)> = Vec::new();
     for (offset, row_area) in row_areas.iter().enumerate() {
@@ -662,7 +713,9 @@ fn render_sections(f: &mut Frame, area: Rect, app: &mut App) {
         let cells = Layout::horizontal(vec![Constraint::Ratio(1, columns as u32); columns]).split(*row_area);
         for (column, cell) in cells.iter().enumerate() {
             let index = row * columns + column;
-            let Some((screen, headline, detail)) = sections.get(index) else { continue };
+            let Some((screen, headline, detail)) = sections.get(index) else {
+                continue;
+            };
             let active = index == selected;
             let block = panel(screen.title(), active)
                 .border_style(Style::new().fg(if active { ACCENT } else { PANEL }))
@@ -693,7 +746,9 @@ fn render_sections(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn flow(f: &mut Frame, area: Rect, app: &mut App) {
     let selected = app.selected_row();
-    let Some((tx, inner)) = require_tx(f, area, app, "VALUE FLOW") else { return };
+    let Some((tx, inner)) = require_tx(f, area, app, "VALUE FLOW") else {
+        return;
+    };
     let transfers = crate::solana::transfers(tx);
     if transfers.is_empty() {
         f.render_widget(
@@ -717,8 +772,14 @@ fn flow(f: &mut Frame, area: Rect, app: &mut App) {
     let rows_per = box_height + 1;
     let capacity = (((inner.height + 1) / rows_per) as usize).max(1);
     let overflow = transfers.len() > capacity;
-    let capacity = if overflow { capacity.saturating_sub(1).max(1) } else { capacity };
-    let start = selected.saturating_sub(capacity.saturating_sub(1)).min(transfers.len() - 1);
+    let capacity = if overflow {
+        capacity.saturating_sub(1).max(1)
+    } else {
+        capacity
+    };
+    let start = selected
+        .saturating_sub(capacity.saturating_sub(1))
+        .min(transfers.len() - 1);
     let mut y = inner.y;
     let mut hits: Vec<(Rect, usize)> = Vec::new();
 
@@ -729,16 +790,57 @@ fn flow(f: &mut Frame, area: Rect, app: &mut App) {
         let active = row == selected;
         let node = &tx.nodes[transfer.node];
         let failed = node.status == Status::Failed;
-        let accent = if failed { BAD } else if active { ACCENT } else { PANEL };
-        let text = if active { Style::new().fg(Color::White).bold() } else { Style::new().fg(Color::Rgb(176, 180, 210)) };
+        let accent = if failed {
+            BAD
+        } else if active {
+            ACCENT
+        } else {
+            PANEL
+        };
+        let text = if active {
+            Style::new().fg(Color::White).bold()
+        } else {
+            Style::new().fg(Color::Rgb(176, 180, 210))
+        };
 
-        let left = Rect { x: inner.x, y, width: box_width, height: box_height };
-        let middle = Rect { x: left.x + box_width + gap, y, width: middle_width, height: box_height };
-        let right = Rect { x: middle.x + middle_width + gap, y, width: box_width, height: box_height };
+        let left = Rect {
+            x: inner.x,
+            y,
+            width: box_width,
+            height: box_height,
+        };
+        let middle = Rect {
+            x: left.x + box_width + gap,
+            y,
+            width: middle_width,
+            height: box_height,
+        };
+        let right = Rect {
+            x: middle.x + middle_width + gap,
+            y,
+            width: box_width,
+            height: box_height,
+        };
 
         let amount = format!("{:.6} {}", transfer.amount, transfer.unit);
-        draw_box(f, left, &short(&transfer.from), &format!("-{amount}"), accent, text, BAD);
-        draw_box(f, middle, &node_label(node), &format!("{}  ix {}", transfer.kind, node.path), accent, text, accent);
+        draw_box(
+            f,
+            left,
+            &short(&transfer.from),
+            &format!("-{amount}"),
+            accent,
+            text,
+            BAD,
+        );
+        draw_box(
+            f,
+            middle,
+            &node_label(node),
+            &format!("{}  ix {}", transfer.kind, node.path),
+            accent,
+            text,
+            accent,
+        );
         if right.x + right.width <= inner.x + inner.width {
             draw_box(f, right, &short(&transfer.to), &format!("+{amount}"), accent, text, OK);
         }
@@ -753,18 +855,43 @@ fn flow(f: &mut Frame, area: Rect, app: &mut App) {
             let line = format!("{}▶", "─".repeat(width.saturating_sub(1) as usize));
             f.render_widget(
                 Paragraph::new(Line::styled(line, Style::new().fg(accent))),
-                Rect { x: start, y: arrow_y, width, height: 1 },
+                Rect {
+                    x: start,
+                    y: arrow_y,
+                    width,
+                    height: 1,
+                },
             );
         }
         let label_x = left.x + left.width + 1;
         if label_x + label.chars().count() as u16 <= middle.x {
             f.render_widget(
-                Paragraph::new(Line::styled(label, if active { Style::new().fg(ACCENT).bold() } else { muted() })),
-                Rect { x: label_x, y, width: middle.x - label_x, height: 1 },
+                Paragraph::new(Line::styled(
+                    label,
+                    if active {
+                        Style::new().fg(ACCENT).bold()
+                    } else {
+                        muted()
+                    },
+                )),
+                Rect {
+                    x: label_x,
+                    y,
+                    width: middle.x - label_x,
+                    height: 1,
+                },
             );
         }
 
-        hits.push((Rect { x: inner.x, y, width: inner.width, height: box_height }, row));
+        hits.push((
+            Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: box_height,
+            },
+            row,
+        ));
         y += rows_per;
     }
     for (area, row) in hits {
@@ -782,20 +909,17 @@ fn flow(f: &mut Frame, area: Rect, app: &mut App) {
                 ),
                 muted(),
             )),
-            Rect { x: inner.x, y: inner.y + inner.height - 1, width: inner.width, height: 1 },
+            Rect {
+                x: inner.x,
+                y: inner.y + inner.height - 1,
+                width: inner.width,
+                height: 1,
+            },
         );
     }
 }
 
-fn draw_box(
-    f: &mut Frame,
-    area: Rect,
-    title: &str,
-    detail: &str,
-    border: Color,
-    text: Style,
-    detail_color: Color,
-) {
+fn draw_box(f: &mut Frame, area: Rect, title: &str, detail: &str, border: Color, text: Style, detail_color: Color) {
     let block = Block::new()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -813,13 +937,22 @@ fn draw_box(
 
 fn compact_keys(line: &str) -> String {
     line.split(' ')
-        .map(|token| if token.len() >= 32 { short(token) } else { token.to_string() })
+        .map(|token| {
+            if token.len() >= 32 {
+                short(token)
+            } else {
+                token.to_string()
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
 
 fn call_path(tx: &crate::solana::Tx, index: usize) -> Vec<String> {
-    tx.ancestors(index).into_iter().map(|i| node_label(&tx.nodes[i])).collect()
+    tx.ancestors(index)
+        .into_iter()
+        .map(|i| node_label(&tx.nodes[i]))
+        .collect()
 }
 
 fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
@@ -859,7 +992,10 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         Line::raw(""),
         Line::styled("COMPUTE UNITS", muted()),
         Line::from(vec![
-            Span::styled(format!("{} self", thousands(node.self_cu as u64)), Style::new().fg(ACCENT).bold()),
+            Span::styled(
+                format!("{} self", thousands(node.self_cu as u64)),
+                Style::new().fg(ACCENT).bold(),
+            ),
             Span::styled(
                 format!(
                     "  ·  {} inclusive  ·  {:.1}% of tx",
@@ -928,7 +1064,9 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn accounts(f: &mut Frame, area: Rect, app: &mut App) {
-    let Some((tx, inner)) = require_tx(f, area, app, "ACCOUNTS") else { return };
+    let Some((tx, inner)) = require_tx(f, area, app, "ACCOUNTS") else {
+        return;
+    };
     let rows = app.account_rows();
     let items: Vec<ListItem> = rows
         .iter()
@@ -953,11 +1091,16 @@ fn accounts(f: &mut Frame, area: Rect, app: &mut App) {
     let keys: Vec<String> = rows.iter().map(|&i| tx.accounts[i].key.clone()).collect();
     for (row, key) in keys.into_iter().take(inner.height as usize).enumerate() {
         app.push_hit(
-            Rect { x: inner.x, y: inner.y + row as u16, width: inner.width, height: 1 },
+            Rect {
+                x: inner.x,
+                y: inner.y + row as u16,
+                width: inner.width,
+                height: 1,
+            },
             Click::Inspect(key),
         );
     }
-    let mut state = app.list.clone();
+    let mut state = app.list;
     state.select(Some(app.selected_row()));
     f.render_stateful_widget(
         List::new(items).highlight_style(Style::new().bg(Color::Rgb(38, 38, 58))),
@@ -967,14 +1110,20 @@ fn accounts(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn state_diff(f: &mut Frame, area: Rect, app: &mut App) {
-    let Some((tx, inner)) = require_tx(f, area, app, "STATE DIFF — BALANCE CHANGES") else { return };
+    let Some((tx, inner)) = require_tx(f, area, app, "STATE DIFF — BALANCE CHANGES") else {
+        return;
+    };
     if tx.balances.is_empty() {
         f.render_widget(wrapped("no balance changes recorded", muted()), inner);
         return;
     }
     let rows = app.balance_rows();
     let header = Rect { height: 1, ..inner };
-    let body = Rect { y: inner.y + 1, height: inner.height.saturating_sub(1), ..inner };
+    let body = Rect {
+        y: inner.y + 1,
+        height: inner.height.saturating_sub(1),
+        ..inner
+    };
     f.render_widget(
         Paragraph::new(Line::styled(
             format!(
@@ -1003,7 +1152,7 @@ fn state_diff(f: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
     clickable_rows(app, body, items.len());
-    let mut state = app.list.clone();
+    let mut state = app.list;
     state.select(Some(app.selected_row()));
     f.render_stateful_widget(
         List::new(items).highlight_style(Style::new().bg(Color::Rgb(38, 38, 58))),
@@ -1014,7 +1163,9 @@ fn state_diff(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn logs(f: &mut Frame, area: Rect, app: &mut App) {
     let rows = app.log_rows();
-    let Some((tx, inner)) = require_tx(f, area, app, "PROGRAM LOGS") else { return };
+    let Some((tx, inner)) = require_tx(f, area, app, "PROGRAM LOGS") else {
+        return;
+    };
     let frames = tx.log_frames();
     let items: Vec<ListItem> = rows
         .iter()
@@ -1039,13 +1190,16 @@ fn logs(f: &mut Frame, area: Rect, app: &mut App) {
                     format!("{:<7}", node.map(|node| node.path.clone()).unwrap_or_default()),
                     muted(),
                 ),
-                Span::styled("│ ".repeat(depth), Style::new().fg(if failed { Color::Rgb(128, 72, 78) } else { PANEL })),
+                Span::styled(
+                    "│ ".repeat(depth),
+                    Style::new().fg(if failed { Color::Rgb(128, 72, 78) } else { PANEL }),
+                ),
                 Span::styled(compact_keys(line), style),
             ]))
         })
         .collect();
     clickable_rows(app, inner, items.len());
-    let mut state = app.list.clone();
+    let mut state = app.list;
     state.select(Some(app.selected_row()));
     f.render_stateful_widget(
         List::new(items).highlight_style(Style::new().bg(Color::Rgb(38, 38, 58))),
@@ -1078,13 +1232,23 @@ fn raw(f: &mut Frame, area: Rect, app: &mut App) {
 fn clickable_rows(app: &mut App, area: Rect, count: usize) {
     for row in 0..count.min(area.height as usize) {
         app.push_hit(
-            Rect { x: area.x, y: area.y + row as u16, width: area.width, height: 1 },
+            Rect {
+                x: area.x,
+                y: area.y + row as u16,
+                width: area.width,
+                height: 1,
+            },
             Click::Row(row),
         );
     }
 }
 
-fn require_account<'a>(f: &mut Frame, area: Rect, app: &'a App, title: &str) -> Option<(&'a crate::solana::AccountInfo, Rect)> {
+fn require_account<'a>(
+    f: &mut Frame,
+    area: Rect,
+    app: &'a App,
+    title: &str,
+) -> Option<(&'a crate::solana::AccountInfo, Rect)> {
     let block = panel(title, !app.focus_nav);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -1112,7 +1276,9 @@ fn decode_account_fields(
 }
 
 fn account_info(f: &mut Frame, area: Rect, app: &mut App) {
-    let Some((account, inner)) = require_account(f, area, app, "ACCOUNT") else { return };
+    let Some((account, inner)) = require_account(f, area, app, "ACCOUNT") else {
+        return;
+    };
     let decoded = decode_account_fields(&app.cluster, account);
 
     let mut lines = vec![
@@ -1129,7 +1295,10 @@ fn account_info(f: &mut Frame, area: Rect, app: &mut App) {
         Line::raw(""),
         Line::from(vec![
             Span::styled("BALANCE   ", muted()),
-            Span::styled(format!("{:.9} SOL", account.lamports as f64 / 1e9), Style::new().fg(ACCENT).bold()),
+            Span::styled(
+                format!("{:.9} SOL", account.lamports as f64 / 1e9),
+                Style::new().fg(ACCENT).bold(),
+            ),
             Span::styled(format!("  ({} lamports)", thousands(account.lamports)), muted()),
         ]),
         Line::from(vec![
@@ -1173,7 +1342,9 @@ fn account_info(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn account_data(f: &mut Frame, area: Rect, app: &mut App) {
     let scroll = app.scroll;
-    let Some((account, inner)) = require_account(f, area, app, "ACCOUNT DATA") else { return };
+    let Some((account, inner)) = require_account(f, area, app, "ACCOUNT DATA") else {
+        return;
+    };
     if account.data.is_empty() {
         f.render_widget(wrapped("account holds no data", muted()), inner);
         return;

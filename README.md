@@ -5,7 +5,7 @@ A terminal debugger for Solana transactions. Paste a signature, see why it faile
 Explorers show you *what* happened. `panic` tries to tell you *why*: it decodes the error, names the instruction from program logs, chains your local IDLs to decode instructions and accounts, validates accounts against derived PDAs and token constraints, and runs heuristics that suggest a fix for common failures.
 
 ### Overview
-![Overview](image.png)
+![Overview](images/image.png)
 
 
 ## Install
@@ -53,13 +53,13 @@ Custom endpoints live in `~/.config/panic/config.toml` and show up in the cluste
 A transaction opens into a set of screens: **Overview**, **Execution** (weighted CPI tree with per-frame compute), **Invocation**, **Accounts**, **Flow** (token transfers), **State Diff**, and **Logs** (nested under their invocation frames). Accounts open into **Info**, **Data** (parsed through the IDL when one is found), and **Raw**.
 
 <!-- screenshot: execution / CPI tree -->
-![Execution](image-1.png)
+![Execution](images/image-1.png)
 
 <!-- screenshot: diagnosis with suggested fix -->
-![Dianosis](image-2.png)
+![Dianosis](images/image-2.png)
 
 <!-- screenshot: account data decoded via IDL -->
-![Account](image-3.png)
+![Account](images/image-3.png)
 
 ## Keys
 

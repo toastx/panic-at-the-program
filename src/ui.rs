@@ -28,7 +28,10 @@ pub fn panel(title: &str, focused: bool) -> Block<'_> {
 }
 
 pub fn chip(text: &str, color: Color) -> Span<'static> {
-    Span::styled(format!(" {text} "), Style::new().fg(color).bg(Color::Rgb(32, 33, 48)).bold())
+    Span::styled(
+        format!(" {text} "),
+        Style::new().fg(color).bg(Color::Rgb(32, 33, 48)).bold(),
+    )
 }
 
 pub fn short(key: &str) -> String {
@@ -46,7 +49,7 @@ pub fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -92,13 +95,24 @@ pub fn tree_prefixes(nodes: &[Node]) -> Vec<String> {
 }
 
 pub fn render_topbar(f: &mut Frame, area: Rect, app: &mut App) {
-    let mut spans = vec![Span::styled(" PANIC ", Style::new().fg(ACCENT).bold()), Span::styled("│", muted())];
+    let mut spans = vec![
+        Span::styled(" PANIC ", Style::new().fg(ACCENT).bold()),
+        Span::styled("│", muted()),
+    ];
 
     let x = area.x + spans.iter().map(|s| s.width() as u16).sum::<u16>();
     let label = format!(" ● {} {} ", app.cluster, if app.cluster_menu { "▴" } else { "▾" });
     let width = label.chars().count() as u16;
-    spans.push(Span::styled(label, Style::new().fg(OK).bg(Color::Rgb(32, 33, 48)).bold()));
-    app.cluster_button = Rect { x, y: area.y, width, height: 1 };
+    spans.push(Span::styled(
+        label,
+        Style::new().fg(OK).bg(Color::Rgb(32, 33, 48)).bold(),
+    ));
+    app.cluster_button = Rect {
+        x,
+        y: area.y,
+        width,
+        height: 1,
+    };
     app.push_hit(app.cluster_button, Click::ClusterMenu);
     spans.push(Span::styled("│", muted()));
 
@@ -152,16 +166,27 @@ pub fn render_topbar(f: &mut Frame, area: Rect, app: &mut App) {
     let button = " ↗ Explorer ";
     let width = button.chars().count() as u16;
     if area.width > width + 4 {
-        let button_area = Rect { x: area.x + area.width - width, y: area.y, width, height: 1 };
+        let button_area = Rect {
+            x: area.x + area.width - width,
+            y: area.y,
+            width,
+            height: 1,
+        };
         f.render_widget(
-            Paragraph::new(Span::styled(button, Style::new().fg(ACCENT).bg(Color::Rgb(32, 33, 48)).bold())),
+            Paragraph::new(Span::styled(
+                button,
+                Style::new().fg(ACCENT).bg(Color::Rgb(32, 33, 48)).bold(),
+            )),
             button_area,
         );
         app.push_hit(button_area, Click::Explorer);
     }
     f.render_widget(
         Paragraph::new(Line::from(spans)),
-        Rect { width: area.width.saturating_sub(width + 1), ..area },
+        Rect {
+            width: area.width.saturating_sub(width + 1),
+            ..area
+        },
     );
 }
 
@@ -204,7 +229,15 @@ pub fn render_cluster_menu(f: &mut Frame, app: &mut App) {
     for (i, cluster) in clusters.into_iter().enumerate() {
         let y = inner.y + i as u16;
         if y < inner.y + inner.height {
-            app.push_hit(Rect { x: inner.x, y, width: inner.width, height: 1 }, Click::Cluster(cluster));
+            app.push_hit(
+                Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height: 1,
+                },
+                Click::Cluster(cluster),
+            );
         }
     }
     f.render_widget(Paragraph::new(lines), inner);
@@ -268,7 +301,12 @@ pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
 
     for row in 0..items.len().min(rows[0].height as usize) {
         app.push_hit(
-            Rect { x: rows[0].x, y: rows[0].y + row as u16, width: rows[0].width, height: 1 },
+            Rect {
+                x: rows[0].x,
+                y: rows[0].y + row as u16,
+                width: rows[0].width,
+                height: 1,
+            },
             Click::Entry(row),
         );
     }
@@ -288,7 +326,13 @@ pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
         nav_help(
             f,
             rows[1],
-            &[("Enter", "open"), ("Tab", "panel"), ("o", "load"), ("[ ]", "network"), ("?", "help")],
+            &[
+                ("Enter", "open"),
+                ("Tab", "panel"),
+                ("o", "load"),
+                ("[ ]", "network"),
+                ("?", "help"),
+            ],
         );
     }
 }
@@ -327,9 +371,16 @@ pub fn render_compute_chart(f: &mut Frame, area: Rect, tx: &Tx, selected: usize,
         let filled = (node.self_cu as usize * bar_width) / max as usize;
         let mut spans = vec![Span::styled(
             format!("{label:<label_width$.label_width$}"),
-            if i == selected { Style::new().fg(ACCENT).bold() } else { Style::new() },
+            if i == selected {
+                Style::new().fg(ACCENT).bold()
+            } else {
+                Style::new()
+            },
         )];
-        spans.push(Span::styled("█".repeat(filled.max(usize::from(node.self_cu > 0))), Style::new().fg(color)));
+        spans.push(Span::styled(
+            "█".repeat(filled.max(usize::from(node.self_cu > 0))),
+            Style::new().fg(color),
+        ));
         spans.push(Span::raw(format!(" {}", thousands(node.self_cu as u64))));
         lines.push(Line::from(spans));
     }
@@ -349,7 +400,11 @@ pub fn render_compute_chart(f: &mut Frame, area: Rect, tx: &Tx, selected: usize,
     lines.push(Line::from(vec![
         Span::styled(format!("{:<label_width$}", "TOTAL (inclusive)"), muted()),
         Span::styled(
-            format!("{} of {} CU limit", thousands(tx.cu as u64), thousands(tx.cu_limit as u64)),
+            format!(
+                "{} of {} CU limit",
+                thousands(tx.cu as u64),
+                thousands(tx.cu_limit as u64)
+            ),
             Style::new().fg(ACCENT).bold(),
         ),
     ]));

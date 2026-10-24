@@ -168,7 +168,11 @@ impl App {
         if key == next_key {
             return;
         }
-        self.stack.push(Location { kind: self.kind, key, screen: self.screen });
+        self.stack.push(Location {
+            kind: self.kind,
+            key,
+            screen: self.screen,
+        });
     }
 
     pub fn drill_into_account(&mut self, pubkey: &str) {
@@ -246,9 +250,10 @@ impl App {
 
     pub fn refresh_history(&mut self) {
         self.entries = solana::entries(&self.cluster);
-        if let Some(index) = self.loaded_key().and_then(|key| {
-            self.entries.iter().position(|e| e.key == key)
-        }) {
+        if let Some(index) = self
+            .loaded_key()
+            .and_then(|key| self.entries.iter().position(|e| e.key == key))
+        {
             self.entry_index = index;
         }
     }
@@ -384,7 +389,9 @@ impl App {
 
     fn section_summary(&self, screen: Screen) -> (String, String) {
         if self.kind == Kind::Account {
-            let Some(account) = self.account.as_ref() else { return (String::new(), String::new()) };
+            let Some(account) = self.account.as_ref() else {
+                return (String::new(), String::new());
+            };
             return match screen {
                 Screen::Data => (
                     format!("{} B", account.data.len()),
@@ -397,7 +404,9 @@ impl App {
                 _ => (String::new(), String::new()),
             };
         }
-        let Some(tx) = self.tx() else { return (String::new(), String::new()) };
+        let Some(tx) = self.tx() else {
+            return (String::new(), String::new());
+        };
         match screen {
             Screen::Execution => (
                 format!("{} calls", tx.nodes.len()),
@@ -431,10 +440,7 @@ impl App {
                     .filter(|b| b.label == "SOL")
                     .map(|b| b.after - b.before)
                     .sum();
-                (
-                    format!("{} changes", tx.balances.len()),
-                    format!("net {net:+.6} SOL"),
-                )
+                (format!("{} changes", tx.balances.len()), format!("net {net:+.6} SOL"))
             }
             Screen::Logs => (
                 format!("{} lines", tx.logs.len()),
@@ -566,7 +572,9 @@ impl App {
 
     pub fn selected_node(&self) -> Option<usize> {
         let visible = self.visible_nodes();
-        visible.get(self.selected_row().min(visible.len().saturating_sub(1))).copied()
+        visible
+            .get(self.selected_row().min(visible.len().saturating_sub(1)))
+            .copied()
     }
 
     pub fn tx(&self) -> Option<&Tx> {
@@ -578,7 +586,12 @@ impl App {
     }
 
     fn filtered<T>(items: &[T], hit: impl Fn(&T) -> bool) -> Vec<usize> {
-        items.iter().enumerate().filter(|(_, item)| hit(item)).map(|(i, _)| i).collect()
+        items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| hit(item))
+            .map(|(i, _)| i)
+            .collect()
     }
 
     pub fn account_rows(&self) -> Vec<usize> {

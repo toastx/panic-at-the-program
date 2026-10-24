@@ -1,25 +1,24 @@
 mod app;
 mod diagnose;
 mod idl;
-mod workspace;
 mod screens;
 mod solana;
-mod validate;
 mod ui;
+mod validate;
+mod workspace;
 
 use std::io;
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, MouseButton,
-    MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::prelude::*;
 
-use app::{App, Mode, Screen, clusters};
 #[cfg(test)]
 use app::Click;
+use app::{App, Mode, Screen, clusters};
 
 fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -81,7 +80,9 @@ fn rpc_command(args: &[String]) -> io::Result<()> {
             }
         }
         _ => {
-            eprintln!("usage: panic rpc                    list clusters\n       panic rpc add <name> <url>  save a custom endpoint\n       panic rpc rm <name>         remove a custom endpoint");
+            eprintln!(
+                "usage: panic rpc                    list clusters\n       panic rpc add <name> <url>  save a custom endpoint\n       panic rpc rm <name>         remove a custom endpoint"
+            );
             std::process::exit(2);
         }
     }
@@ -98,7 +99,8 @@ fn move_selection(app: &mut App, delta: isize) {
         return;
     }
     let current = app.selected_row() as isize;
-    app.list.select(Some(current.saturating_add(delta).clamp(0, rows as isize - 1) as usize));
+    app.list
+        .select(Some(current.saturating_add(delta).clamp(0, rows as isize - 1) as usize));
 }
 
 fn grid_step(app: &App) -> isize {
@@ -125,7 +127,9 @@ fn toggle_collapse(app: &mut App, collapse: bool) -> bool {
     let has_children = app.tx().is_some_and(|tx| tx.nodes[index].children > 0);
 
     if collapse && (!has_children || app.collapsed.contains(&index)) {
-        let Some(parent) = app.parent_node(index) else { return false };
+        let Some(parent) = app.parent_node(index) else {
+            return false;
+        };
         app.collapsed.insert(parent);
         if let Some(row) = app.visible_nodes().iter().position(|&i| i == parent) {
             app.list.select(Some(row));
@@ -289,7 +293,11 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('r') => {
             if let Some(key) = app.loaded_key() {
                 let (kind, screen) = (app.kind, app.screen);
-                let cache_key = if kind == solana::Kind::Account { format!("account-{key}") } else { key.clone() };
+                let cache_key = if kind == solana::Kind::Account {
+                    format!("account-{key}")
+                } else {
+                    key.clone()
+                };
                 solana::evict(&app.cluster, &cache_key);
                 app.load(kind, &key);
                 if app.message.is_empty() {
@@ -605,7 +613,9 @@ mod tests {
         app.goto(Screen::Overview);
         let screen = render(&mut app, 120, 34);
         assert!(
-            !app.sections().iter().any(|(screen, _, _)| *screen == Screen::Invocation),
+            !app.sections()
+                .iter()
+                .any(|(screen, _, _)| *screen == Screen::Invocation),
             "the drill-in view is not a listed section"
         );
         assert!(screen.contains("┌ Execution"));
@@ -792,7 +802,10 @@ mod tests {
         assert_eq!(decoded.name, "withdraw");
         assert_eq!(decoded.args[0], ("amount".into(), "7500000".into()));
         assert_eq!(decoded.args[1], ("memo".into(), "hi".into()));
-        assert_eq!(decoded.specs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["vault", "authority"]);
+        assert_eq!(
+            decoded.specs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["vault", "authority"]
+        );
 
         let mut account_data = vec![9u8; 8];
         account_data.extend_from_slice(&solana::bs58_decode("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"));
@@ -882,8 +895,15 @@ mod tests {
 
         let program = idl::parse(&shank);
         assert_eq!(program.flavor, idl::Flavor::Shank);
-        assert_eq!(program.address.as_deref(), Some("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"));
-        assert_eq!(program.instructions[0].discriminator, vec![33], "shank uses a single-byte discriminant");
+        assert_eq!(
+            program.address.as_deref(),
+            Some("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s")
+        );
+        assert_eq!(
+            program.instructions[0].discriminator,
+            vec![33],
+            "shank uses a single-byte discriminant"
+        );
         assert!(program.instructions[0].accounts[1].signer);
         assert!(program.instructions[0].accounts[0].writable);
 
@@ -939,7 +959,10 @@ mod tests {
 
         let program = idl::parse(&codama);
         assert_eq!(program.flavor, idl::Flavor::Codama);
-        assert_eq!(program.address.as_deref(), Some("Vau1t11111111111111111111111111111111111"));
+        assert_eq!(
+            program.address.as_deref(),
+            Some("Vau1t11111111111111111111111111111111111")
+        );
         assert_eq!(program.instructions[0].discriminator, vec![3]);
         assert!(program.instructions[0].accounts[1].signer);
         assert!(!program.instructions[0].accounts[1].writable);
@@ -952,7 +975,10 @@ mod tests {
         assert_eq!(decoded.name, "withdraw");
         assert_eq!(decoded.args[0], ("amount".into(), "999".into()));
         assert_eq!(decoded.args[1], ("memo".into(), "ok".into()));
-        assert_eq!(decoded.specs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["vault", "authority"]);
+        assert_eq!(
+            decoded.specs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["vault", "authority"]
+        );
 
         let mut account_data = vec![7u8];
         account_data.extend_from_slice(&solana::bs58_decode("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"));
@@ -1042,7 +1068,10 @@ mod tests {
         let fixed = json!([{"name": "authority"}, {"name": "token_program", "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}]);
         let findings = validate::declared_findings(&idl::account_specs(&fixed), node);
         let address = findings.iter().find(|f| f.message.contains("address")).unwrap();
-        assert_eq!(address.expected.as_deref(), Some("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"));
+        assert_eq!(
+            address.expected.as_deref(),
+            Some("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+        );
         assert_eq!(address.actual.as_deref(), Some("Vau1t111"));
     }
 
@@ -1059,7 +1088,11 @@ mod tests {
         let mut state = HashMap::new();
         state.insert(
             "Vau1t111".to_string(),
-            validate::State { owner: validate::TOKEN.to_string(), lamports: 100, data },
+            validate::State {
+                owner: validate::TOKEN.to_string(),
+                lamports: 100,
+                data,
+            },
         );
 
         let roles = vec!["mint".to_string(), "associated_token".to_string()];
@@ -1105,8 +1138,14 @@ mod tests {
         assert_eq!(parsed.name.as_deref(), Some("ConstraintSeeds"));
         assert_eq!(parsed.number, Some(2006));
         assert_eq!(parsed.message.as_deref(), Some("A seeds constraint was violated"));
-        assert_eq!(parsed.actual.as_deref(), Some("3sPq1aBxGv2kkR7ZLczdKJ2w7xkGk4trQJcM3pQWvNnT"));
-        assert_eq!(parsed.expected.as_deref(), Some("7xKX9mPaRvQw1bNcTzWd4rYfG6hJ8uL2sE5vA3dC9kFq"));
+        assert_eq!(
+            parsed.actual.as_deref(),
+            Some("3sPq1aBxGv2kkR7ZLczdKJ2w7xkGk4trQJcM3pQWvNnT")
+        );
+        assert_eq!(
+            parsed.expected.as_deref(),
+            Some("7xKX9mPaRvQw1bNcTzWd4rYfG6hJ8uL2sE5vA3dC9kFq")
+        );
 
         let thrown = ["Program log: AnchorError thrown in programs/vault/src/lib.rs:88. Error Code: Unauthorized. Error Number: 6000. Error Message: not the owner."]
             .map(String::from)
@@ -1151,7 +1190,11 @@ mod tests {
 
         assert_eq!(depth_of("Instruction: Withdraw"), Some(0));
         assert_eq!(depth_of("Instruction: TransferChecked"), Some(1));
-        assert_eq!(depth_of("consumed 8420"), Some(1), "inner frame owns its own meter line");
+        assert_eq!(
+            depth_of("consumed 8420"),
+            Some(1),
+            "inner frame owns its own meter line"
+        );
 
         let mut app = loaded();
         app.goto(Screen::Logs);
@@ -1178,7 +1221,10 @@ mod tests {
         );
 
         assert_eq!(parsed[""]["idl_dir"], "idls");
-        assert_eq!(parsed["idl"]["Vau1t11111111111111111111111111111111111"], "idls/vault.json");
+        assert_eq!(
+            parsed["idl"]["Vau1t11111111111111111111111111111111111"],
+            "idls/vault.json"
+        );
         assert_eq!(parsed["programs"]["Vau1t11111111111111111111111111111111111"], "Vault");
         assert_eq!(parsed["accounts"]["Auth1111"], "treasury");
         assert!(workspace::parse("").is_empty());
@@ -1198,8 +1244,10 @@ mod tests {
 
         let compute = fix(
             json!({"InstructionError": [0, "ProgramFailedToComplete"]}),
-            vec!["Program Vau1t11111111111111111111111111111111111 consumed 200000 of 200000 compute units".into(),
-                 "Program failed to complete: exceeded CUs meter at BPF instruction".into()],
+            vec![
+                "Program Vau1t11111111111111111111111111111111111 consumed 200000 of 200000 compute units".into(),
+                "Program failed to complete: exceeded CUs meter at BPF instruction".into(),
+            ],
             200_000,
             200_000,
         );
@@ -1212,7 +1260,10 @@ mod tests {
             0,
             0,
         );
-        assert!(rent.contains("0.001148400 more SOL"), "shows the exact shortfall: {rent}");
+        assert!(
+            rent.contains("0.001148400 more SOL"),
+            "shows the exact shortfall: {rent}"
+        );
 
         let in_use = fix(
             json!({"InstructionError": [0, {"Custom": 0}]}),
@@ -1237,8 +1288,7 @@ mod tests {
     #[test]
     fn token_program_errors_use_the_token_table() {
         let nodes = solana::parse("s", "devnet", &fixture()).nodes;
-        let failure =
-            diagnose::failure(&json!({"InstructionError": [0, {"Custom": 1}]}), &nodes, &[], 0, 0).unwrap();
+        let failure = diagnose::failure(&json!({"InstructionError": [0, {"Custom": 1}]}), &nodes, &[], 0, 0).unwrap();
         assert!(failure.headline.contains("InsufficientFunds"));
         assert!(failure.headline.contains("Token program"));
         assert!(failure.meaning.contains("not hold enough tokens"));

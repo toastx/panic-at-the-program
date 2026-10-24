@@ -41,7 +41,10 @@ fn field(line: &str, key: &str) -> Option<String> {
 
 pub fn anchor_log(logs: &[String]) -> AnchorLog {
     let mut parsed = AnchorLog::default();
-    let mut lines = logs.iter().filter_map(|line| line.strip_prefix("Program log: ")).peekable();
+    let mut lines = logs
+        .iter()
+        .filter_map(|line| line.strip_prefix("Program log: "))
+        .peekable();
 
     while let Some(line) = lines.next() {
         if let Some(rest) = line.strip_prefix("AnchorError ") {
@@ -53,7 +56,9 @@ pub fn anchor_log(logs: &[String]) -> AnchorLog {
                 parsed.source = Some(source.trim().trim_end_matches('.').to_string());
             }
             parsed.name = field(rest, "Error Code: ").or(parsed.name);
-            parsed.number = field(rest, "Error Number: ").and_then(|v| v.parse().ok()).or(parsed.number);
+            parsed.number = field(rest, "Error Number: ")
+                .and_then(|v| v.parse().ok())
+                .or(parsed.number);
             parsed.message = field(rest, "Error Message: ").or(parsed.message);
             continue;
         }
@@ -80,13 +85,15 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
         Some(parsed) => parsed,
         None => (None, Code::Other(err.to_string())),
     };
-    let node = nodes
-        .iter()
-        .rposition(|n| n.status == Status::Failed)
-        .or_else(|| {
-            let index = instruction?;
-            nodes.iter().enumerate().filter(|(_, n)| n.depth == 0).nth(index).map(|(i, _)| i)
-        });
+    let node = nodes.iter().rposition(|n| n.status == Status::Failed).or_else(|| {
+        let index = instruction?;
+        nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.depth == 0)
+            .nth(index)
+            .map(|(i, _)| i)
+    });
     let program = node.map(|i| nodes[i].program.as_str()).unwrap_or_default();
     let (mut headline, mut meaning) = describe(&code, program);
 
@@ -95,25 +102,25 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
     if let (Some(name), Some(number)) = (&anchor.name, anchor.number) {
         headline = format!("{name} — error {number} (0x{number:x})");
     }
-    if let Some(message) = &anchor.message {
-        if !message.is_empty() {
-            meaning = message.clone();
-        }
+    if let Some(message) = &anchor.message
+        && !message.is_empty()
+    {
+        meaning = message.clone();
     }
 
     let mut checks = Vec::new();
-    if let (Code::Named(name), Some(node)) = (&code, node) {
-        if name == "MissingRequiredSignature" {
-            let missing: Vec<String> = nodes[node]
-                .accounts
-                .iter()
-                .filter(|a| !a.signer)
-                .map(|a| crate::ui::short(&a.key))
-                .take(4)
-                .collect();
-            if !missing.is_empty() {
-                checks.push(format!("no signature from: {}", missing.join(", ")));
-            }
+    if let (Code::Named(name), Some(node)) = (&code, node)
+        && name == "MissingRequiredSignature"
+    {
+        let missing: Vec<String> = nodes[node]
+            .accounts
+            .iter()
+            .filter(|a| !a.signer)
+            .map(|a| crate::ui::short(&a.key))
+            .take(4)
+            .collect();
+        if !missing.is_empty() {
+            checks.push(format!("no signature from: {}", missing.join(", ")));
         }
     }
     if let Code::Custom(n) = code {
@@ -129,10 +136,10 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
 
     checks.extend(rules(&code, &headline, logs_slice, cu, cu_limit));
 
-    if let (Some(expected), Some(actual)) = (&anchor.expected, &anchor.actual) {
-        if expected != actual {
-            checks.push("the value the program expected differs from the one passed".to_string());
-        }
+    if let (Some(expected), Some(actual)) = (&anchor.expected, &anchor.actual)
+        && expected != actual
+    {
+        checks.push("the value the program expected differs from the one passed".to_string());
     }
     if let Some(account) = &anchor.account {
         checks.insert(0, format!("account `{account}` failed the constraint"));
@@ -161,9 +168,8 @@ pub fn rules(code: &Code, headline: &str, logs: &[String], cu: u32, cu_limit: u3
             "BlockhashNotFound" => out.push(
                 "the blockhash expired before the transaction landed — fetch a fresh one and re-sign".to_string(),
             ),
-            "AlreadyProcessed" => out.push(
-                "this transaction already landed — reuse the earlier signature instead of resending".to_string(),
-            ),
+            "AlreadyProcessed" => out
+                .push("this transaction already landed — reuse the earlier signature instead of resending".to_string()),
             "InsufficientFundsForFee" => {
                 out.push("the fee payer cannot cover the fee — fund it before retrying".to_string())
             }
@@ -202,7 +208,7 @@ pub fn rules(code: &Code, headline: &str, logs: &[String], cu: u32, cu_limit: u3
         out.push("the quote moved before the transaction landed — widen the tolerance or requote".to_string());
     }
 
-    if matches!(code, Code::Custom(100 | 101 | 102)) {
+    if matches!(code, Code::Custom(100..=102)) {
         out.push(
             "the deployed program does not recognise this instruction — redeploy, or regenerate the client from the deployed IDL"
                 .to_string(),
@@ -243,7 +249,10 @@ fn describe(code: &Code, program: &str) -> (String, String) {
         Code::Custom(n) => {
             if let Some((name, meaning)) = program_error(program, *n) {
                 return (
-                    format!("{name} — {program_label} error {n} (0x{n:x})", program_label = short_program(program)),
+                    format!(
+                        "{name} — {program_label} error {n} (0x{n:x})",
+                        program_label = short_program(program)
+                    ),
                     meaning.to_string(),
                 );
             }
@@ -268,7 +277,9 @@ fn describe(code: &Code, program: &str) -> (String, String) {
 
 fn short_program(program: &str) -> &'static str {
     match program {
-        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" | "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" => "Token program",
+        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" | "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" => {
+            "Token program"
+        }
         "11111111111111111111111111111111" => "System program",
         _ => "program",
     }
@@ -279,16 +290,31 @@ fn program_error(program: &str, code: u32) -> Option<(&'static str, &'static str
         "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" | "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" => {
             Some(match code {
                 0 => ("NotRentExempt", "the account holds less than the rent-exempt minimum"),
-                1 => ("InsufficientFunds", "the source token account does not hold enough tokens"),
+                1 => (
+                    "InsufficientFunds",
+                    "the source token account does not hold enough tokens",
+                ),
                 2 => ("InvalidMint", "the mint account is not a valid mint"),
                 3 => ("MintMismatch", "the token account belongs to a different mint"),
-                4 => ("OwnerMismatch", "the signer is not the owner or delegate of the token account"),
+                4 => (
+                    "OwnerMismatch",
+                    "the signer is not the owner or delegate of the token account",
+                ),
                 5 => ("FixedSupply", "the mint has a fixed supply and cannot mint more"),
                 6 => ("AlreadyInUse", "the account is already initialized"),
                 9 => ("UninitializedState", "the account has not been initialized"),
-                10 => ("NativeNotSupported", "this instruction does not accept native SOL accounts"),
-                11 => ("NonNativeHasBalance", "the account still holds tokens and cannot be closed"),
-                13 => ("InvalidState", "the account is in an invalid state for this instruction"),
+                10 => (
+                    "NativeNotSupported",
+                    "this instruction does not accept native SOL accounts",
+                ),
+                11 => (
+                    "NonNativeHasBalance",
+                    "the account still holds tokens and cannot be closed",
+                ),
+                13 => (
+                    "InvalidState",
+                    "the account is in an invalid state for this instruction",
+                ),
                 14 => ("Overflow", "the operation overflowed"),
                 17 => ("AccountFrozen", "the token account is frozen"),
                 18 => ("MintDecimalsMismatch", "the decimals passed do not match the mint"),
@@ -296,11 +322,20 @@ fn program_error(program: &str, code: u32) -> Option<(&'static str, &'static str
             })
         }
         "11111111111111111111111111111111" => Some(match code {
-            0 => ("AccountAlreadyInUse", "the account already exists — use a different seed or skip creation"),
-            1 => ("ResultWithNegativeLamports", "the transfer would leave a negative balance"),
+            0 => (
+                "AccountAlreadyInUse",
+                "the account already exists — use a different seed or skip creation",
+            ),
+            1 => (
+                "ResultWithNegativeLamports",
+                "the transfer would leave a negative balance",
+            ),
             3 => ("InvalidAccountDataLength", "the requested data length does not match"),
             4 => ("MaxSeedLengthExceeded", "a seed exceeds 32 bytes"),
-            5 => ("AddressWithSeedMismatch", "the derived address does not match the account passed"),
+            5 => (
+                "AddressWithSeedMismatch",
+                "the derived address does not match the account passed",
+            ),
             _ => return None,
         }),
         _ => None,
@@ -309,31 +344,70 @@ fn program_error(program: &str, code: u32) -> Option<(&'static str, &'static str
 
 fn anchor_error(code: u32) -> Option<(&'static str, &'static str)> {
     Some(match code {
-        100 => ("InstructionMissing", "the instruction discriminator did not match any handler"),
-        101 => ("InstructionFallbackNotFound", "no fallback handler for this instruction"),
-        102 => ("InstructionDidNotDeserialize", "the instruction arguments failed to deserialize"),
+        100 => (
+            "InstructionMissing",
+            "the instruction discriminator did not match any handler",
+        ),
+        101 => (
+            "InstructionFallbackNotFound",
+            "no fallback handler for this instruction",
+        ),
+        102 => (
+            "InstructionDidNotDeserialize",
+            "the instruction arguments failed to deserialize",
+        ),
         2000 => ("ConstraintMut", "an account marked mut was passed as read-only"),
-        2001 => ("ConstraintHasOne", "a has_one constraint failed — a stored key does not match"),
+        2001 => (
+            "ConstraintHasOne",
+            "a has_one constraint failed — a stored key does not match",
+        ),
         2002 => ("ConstraintSigner", "an account required to sign did not sign"),
         2003 => ("ConstraintRaw", "a raw constraint expression evaluated to false"),
         2004 => ("ConstraintOwner", "the account is owned by the wrong program"),
         2005 => ("ConstraintRentExempt", "the account is not rent exempt"),
         2006 => ("ConstraintSeeds", "the account address does not match the derived PDA"),
-        2012 => ("ConstraintAddress", "the account address does not match the required address"),
+        2012 => (
+            "ConstraintAddress",
+            "the account address does not match the required address",
+        ),
         2014 => ("ConstraintTokenMint", "the token account's mint does not match"),
         2015 => ("ConstraintTokenOwner", "the token account's owner does not match"),
-        2019 => ("ConstraintSpace", "the allocated space does not match the declared space"),
-        3001 => ("AccountDiscriminatorNotFound", "the account has no discriminator — it is uninitialized"),
-        3002 => ("AccountDiscriminatorMismatch", "the account is a different type than expected"),
+        2019 => (
+            "ConstraintSpace",
+            "the allocated space does not match the declared space",
+        ),
+        3001 => (
+            "AccountDiscriminatorNotFound",
+            "the account has no discriminator — it is uninitialized",
+        ),
+        3002 => (
+            "AccountDiscriminatorMismatch",
+            "the account is a different type than expected",
+        ),
         3003 => ("AccountDidNotDeserialize", "the account data failed to deserialize"),
-        3005 => ("AccountNotEnoughKeys", "fewer accounts were passed than the instruction requires"),
+        3005 => (
+            "AccountNotEnoughKeys",
+            "fewer accounts were passed than the instruction requires",
+        ),
         3006 => ("AccountNotMutable", "the account must be writable"),
         3007 => ("AccountOwnedByWrongProgram", "the account is owned by another program"),
         3010 => ("AccountNotSigner", "the account must be a signer"),
-        3011 => ("AccountNotSystemOwned", "the account must be owned by the System program"),
-        3012 => ("AccountNotInitialized", "the account does not exist yet — initialize it first"),
-        3014 => ("AccountNotAssociatedTokenAccount", "the account is not the associated token account"),
-        4100 => ("DeclaredProgramIdMismatch", "declare_id! does not match the deployed program"),
+        3011 => (
+            "AccountNotSystemOwned",
+            "the account must be owned by the System program",
+        ),
+        3012 => (
+            "AccountNotInitialized",
+            "the account does not exist yet — initialize it first",
+        ),
+        3014 => (
+            "AccountNotAssociatedTokenAccount",
+            "the account is not the associated token account",
+        ),
+        4100 => (
+            "DeclaredProgramIdMismatch",
+            "declare_id! does not match the deployed program",
+        ),
         _ => return None,
     })
 }
@@ -375,7 +449,10 @@ pub fn infer_custom(code: u32, flavor: Option<crate::idl::Flavor>) -> (String, S
         Some(flavor @ (Flavor::Shank | Flavor::Codama)) => (
             format!("program error #{code} — {hex}"),
             format!("{} programs number their errors from 0", flavor.label()),
-            format!("error {code} is the {} entry of the program's error enum", ordinal(code + 1)),
+            format!(
+                "error {code} is the {} entry of the program's error enum",
+                ordinal(code + 1)
+            ),
         ),
         None if code >= 6000 => (
             format!("Anchor user error #{} — {hex}", code - 6000),
@@ -385,8 +462,7 @@ pub fn infer_custom(code: u32, flavor: Option<crate::idl::Flavor>) -> (String, S
         None => (
             format!("custom program error {code} (0x{code:x})"),
             "no IDL and no known error table for this program".to_string(),
-            "programs outside Anchor usually number errors from 0, so this is likely their enum index"
-                .to_string(),
+            "programs outside Anchor usually number errors from 0, so this is likely their enum index".to_string(),
         ),
     }
 }

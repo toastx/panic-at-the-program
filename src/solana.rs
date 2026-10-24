@@ -197,7 +197,9 @@ impl Tx {
     }
 
     pub fn failure_path(&self) -> Vec<usize> {
-        self.failed_node.map(|failed| self.ancestors(failed)).unwrap_or_default()
+        self.failed_node
+            .map(|failed| self.ancestors(failed))
+            .unwrap_or_default()
     }
 
     /// Call chain from the top-level instruction down to `index`, inclusive.
@@ -257,7 +259,13 @@ fn program_name(id: &str) -> String {
         "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL" => "Associated Token",
         "ComputeBudget111111111111111111111111111111" => "Compute Budget",
         "Vote111111111111111111111111111111111111111" => "Vote Program",
-        other => return format!("{}…{}", &other[..4.min(other.len())], &other[other.len().saturating_sub(4)..]),
+        other => {
+            return format!(
+                "{}…{}",
+                &other[..4.min(other.len())],
+                &other[other.len().saturating_sub(4)..]
+            );
+        }
     }
     .to_string()
 }
@@ -296,8 +304,16 @@ fn account_roles(result: &Value) -> Vec<Account> {
             },
         })
         .collect();
-    accounts.extend(loaded_writable.into_iter().map(|key| Account { key, signer: false, writable: true }));
-    accounts.extend(loaded_readonly.into_iter().map(|key| Account { key, signer: false, writable: false }));
+    accounts.extend(loaded_writable.into_iter().map(|key| Account {
+        key,
+        signer: false,
+        writable: true,
+    }));
+    accounts.extend(loaded_readonly.into_iter().map(|key| Account {
+        key,
+        signer: false,
+        writable: false,
+    }));
     accounts
 }
 
@@ -313,7 +329,11 @@ fn instruction_accounts(instruction: &Value, keys: &[Account]) -> Vec<Account> {
                         signer: account.signer,
                         writable: account.writable,
                     },
-                    None => Account { key: format!("#{i}"), signer: false, writable: false },
+                    None => Account {
+                        key: format!("#{i}"),
+                        signer: false,
+                        writable: false,
+                    },
                 })
                 .collect()
         })
@@ -359,7 +379,9 @@ fn balance_changes(result: &Value, accounts: &[Account]) -> Vec<BalanceChange> {
                         (
                             t["accountIndex"].as_u64().unwrap_or(0),
                             t["mint"].as_str().unwrap_or("").to_string(),
-                            t.pointer("/uiTokenAmount/uiAmount").and_then(Value::as_f64).unwrap_or(0.0),
+                            t.pointer("/uiTokenAmount/uiAmount")
+                                .and_then(Value::as_f64)
+                                .unwrap_or(0.0),
                         )
                     })
                     .collect()
@@ -413,7 +435,9 @@ pub fn parse(signature: &str, cluster: &str, value: &Value) -> Tx {
         .unwrap_or_default();
 
     for (line_index, line) in logs.iter().enumerate() {
-        let Some(rest) = line.strip_prefix("Program ") else { continue };
+        let Some(rest) = line.strip_prefix("Program ") else {
+            continue;
+        };
         if let Some(name) = rest.strip_prefix("log: Instruction: ") {
             if let Some(&index) = stack.last() {
                 nodes[index].name.get_or_insert_with(|| name.trim().to_string());
@@ -484,12 +508,12 @@ pub fn parse(signature: &str, cluster: &str, value: &Value) -> Tx {
             if let Some(idx) = stack.pop() {
                 nodes[idx].logs.end = line_index + 1;
             }
-        } else if let Some((_, message)) = rest.split_once(" failed: ") {
-            if let Some(idx) = stack.pop() {
-                nodes[idx].status = Status::Failed;
-                nodes[idx].error = Some(message.to_string());
-                nodes[idx].logs.end = line_index + 1;
-            }
+        } else if let Some((_, message)) = rest.split_once(" failed: ")
+            && let Some(idx) = stack.pop()
+        {
+            nodes[idx].status = Status::Failed;
+            nodes[idx].error = Some(message.to_string());
+            nodes[idx].logs.end = line_index + 1;
         }
     }
 
@@ -515,16 +539,17 @@ pub fn parse(signature: &str, cluster: &str, value: &Value) -> Tx {
         .filter(|(_, n)| n.status == Status::Failed)
         .max_by_key(|(_, n)| n.depth)
         .map(|(i, _)| i);
-    let error = result["meta"]["err"]
-        .is_null()
-        .then_some(None)
-        .unwrap_or_else(|| {
+    let error = if result["meta"]["err"].is_null() {
+        None
+    } else {
+        {
             nodes
                 .iter()
                 .find(|n| n.error.is_some())
                 .and_then(|n| n.error.clone())
                 .or_else(|| Some(result["meta"]["err"].to_string()))
-        });
+        }
+    };
 
     let cu = result["meta"]["computeUnitsConsumed"].as_u64().unwrap_or(0) as u32;
     let cu_limit = if cu_limit == 0 { 200_000 } else { cu_limit };
@@ -578,7 +603,11 @@ pub fn fetch_account(cluster: &str, pubkey: &str) -> Result<Value, Box<dyn Error
 }
 
 pub fn accounts_info_sparse(cluster: &str, addresses: &[String]) -> Result<Vec<Option<Value>>, Box<dyn Error>> {
-    let value = rpc(cluster, "getMultipleAccounts", json!([addresses, {"encoding": "base64"}]))?;
+    let value = rpc(
+        cluster,
+        "getMultipleAccounts",
+        json!([addresses, {"encoding": "base64"}]),
+    )?;
     Ok(value
         .pointer("/result/value")
         .and_then(Value::as_array)
@@ -614,7 +643,9 @@ pub fn base64_decode(input: &str) -> Vec<u8> {
     let mut buffer = 0u32;
     let mut bits = 0u32;
     for byte in input.bytes().filter(|b| *b != b'=') {
-        let Some(value) = TABLE.iter().position(|t| *t == byte) else { continue };
+        let Some(value) = TABLE.iter().position(|t| *t == byte) else {
+            continue;
+        };
         buffer = (buffer << 6) | value as u32;
         bits += 6;
         if bits >= 8 {
@@ -646,7 +677,7 @@ pub fn bs58_encode(bytes: &[u8]) -> String {
         }
     }
     let leading = bytes.iter().take_while(|b| **b == 0).count();
-    let mut out = String::from("1".repeat(leading));
+    let mut out = "1".repeat(leading);
     out.extend(digits.iter().rev().map(|d| BS58[*d as usize] as char));
     if out.is_empty() { "1".to_string() } else { out }
 }
@@ -654,7 +685,9 @@ pub fn bs58_encode(bytes: &[u8]) -> String {
 pub fn bs58_decode(input: &str) -> Vec<u8> {
     let mut bytes: Vec<u8> = Vec::new();
     for c in input.chars() {
-        let Some(value) = BS58.iter().position(|b| *b as char == c) else { continue };
+        let Some(value) = BS58.iter().position(|b| *b as char == c) else {
+            continue;
+        };
         let mut carry = value;
         for byte in bytes.iter_mut() {
             carry += (*byte as usize) * 58;
@@ -666,7 +699,10 @@ pub fn bs58_decode(input: &str) -> Vec<u8> {
             carry >>= 8;
         }
     }
-    bytes.extend(std::iter::repeat_n(0u8, input.chars().take_while(|c| *c == '1').count()));
+    bytes.extend(std::iter::repeat_n(
+        0u8,
+        input.chars().take_while(|c| *c == '1').count(),
+    ));
     bytes.reverse();
     bytes
 }
@@ -682,7 +718,10 @@ fn key_at(data: &[u8], offset: usize) -> String {
 }
 
 fn option_key(data: &[u8], offset: usize) -> String {
-    match data.get(offset..offset + 4).map(|t| u32::from_le_bytes(t.try_into().unwrap_or([0; 4]))) {
+    match data
+        .get(offset..offset + 4)
+        .map(|t| u32::from_le_bytes(t.try_into().unwrap_or([0; 4])))
+    {
         Some(1) => key_at(data, offset + 4),
         _ => "none".to_string(),
     }
@@ -860,7 +899,14 @@ pub fn transfers(tx: &Tx) -> Vec<Transfer> {
                     8 => ("Token::Burn", account(0), account(1), raw, "tokens".to_string()),
                     _ => continue,
                 };
-                out.push(Transfer { node, kind: kind.to_string(), from, to, amount, unit });
+                out.push(Transfer {
+                    node,
+                    kind: kind.to_string(),
+                    from,
+                    to,
+                    amount,
+                    unit,
+                });
             }
             _ => {}
         }

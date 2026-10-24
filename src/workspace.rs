@@ -34,7 +34,10 @@ fn load() -> Option<Config> {
             let path = dir.join(name);
             if path.is_file() {
                 let text = std::fs::read_to_string(&path).ok()?;
-                return Some(Config { root: dir, sections: parse(&text) });
+                return Some(Config {
+                    root: dir,
+                    sections: parse(&text),
+                });
             }
         }
         if !dir.pop() {
@@ -63,7 +66,9 @@ pub fn parse(text: &str) -> HashMap<String, HashMap<String, String>> {
             current = name.trim().to_string();
             continue;
         }
-        let Some((key, value)) = line.split_once('=') else { continue };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
         let value = value.trim().trim_matches('"').trim_matches('\'');
         sections
             .entry(current.clone())
@@ -78,7 +83,10 @@ pub fn value(section: &str, key: &str) -> Option<String> {
 }
 
 pub fn home() -> PathBuf {
-    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default()
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_default()
 }
 
 /// User-wide settings (custom RPCs), separate from the per-workspace patp.toml.
@@ -145,10 +153,11 @@ fn write_entry(path: &Path, section: &str, key: &str, value_text: Option<&str>) 
                 .position(|line| line.trim().starts_with('['))
                 .map(|offset| start + 1 + offset)
                 .unwrap_or(lines.len());
-            if let Some(existing) = lines[start + 1..end]
-                .iter()
-                .position(|line| line.split('=').next().is_some_and(|k| k.trim().trim_matches('"') == key))
-            {
+            if let Some(existing) = lines[start + 1..end].iter().position(|line| {
+                line.split('=')
+                    .next()
+                    .is_some_and(|k| k.trim().trim_matches('"') == key)
+            }) {
                 existed = true;
                 match value_text {
                     Some(value) => lines[start + 1 + existing] = format!("{key} = \"{value}\""),

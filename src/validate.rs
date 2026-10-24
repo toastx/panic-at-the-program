@@ -80,7 +80,9 @@ fn rent_exempt_minimum(cluster: &str, size: usize) -> Option<u64> {
 }
 
 pub fn check(cluster: &str, tx: &Tx, index: usize) -> Vec<Finding> {
-    let Some(node) = tx.nodes.get(index) else { return Vec::new() };
+    let Some(node) = tx.nodes.get(index) else {
+        return Vec::new();
+    };
     let decoded = idl::idl(cluster, &node.program)
         .and_then(|idl| idl::instruction(&idl, &bs58_decode(&node.data)).map(|d| (idl, d)));
 
@@ -116,20 +118,30 @@ pub fn declared_findings(specs: &[idl::AccountSpec], node: &Node) -> Vec<Finding
         };
 
         if spec.signer && !actual.signer {
-            findings.push(finding(Level::Error, "declared as signer but did not sign".into(), None, None));
+            findings.push(finding(
+                Level::Error,
+                "declared as signer but did not sign".into(),
+                None,
+                None,
+            ));
         }
         if spec.writable && !actual.writable {
-            findings.push(finding(Level::Error, "declared writable but passed read-only".into(), None, None));
+            findings.push(finding(
+                Level::Error,
+                "declared writable but passed read-only".into(),
+                None,
+                None,
+            ));
         }
-        if let Some(fixed) = spec.address.as_deref() {
-            if fixed != actual.key {
-                findings.push(finding(
-                    Level::Error,
-                    "address does not match the one the program requires".into(),
-                    Some(fixed.to_string()),
-                    Some(actual.key.clone()),
-                ));
-            }
+        if let Some(fixed) = spec.address.as_deref()
+            && fixed != actual.key
+        {
+            findings.push(finding(
+                Level::Error,
+                "address does not match the one the program requires".into(),
+                Some(fixed.to_string()),
+                Some(actual.key.clone()),
+            ));
         }
         if let Some(unresolved) = unresolved_seed(spec) {
             findings.push(finding(
@@ -139,15 +151,15 @@ pub fn declared_findings(specs: &[idl::AccountSpec], node: &Node) -> Vec<Finding
                 None,
             ));
         }
-        if let Some(expected) = derive_pda(spec, &node.program, specs, node) {
-            if expected != actual.key {
-                findings.push(finding(
-                    Level::Error,
-                    "PDA does not match the seeds declared in the IDL".into(),
-                    Some(expected),
-                    Some(actual.key.clone()),
-                ));
-            }
+        if let Some(expected) = derive_pda(spec, &node.program, specs, node)
+            && expected != actual.key
+        {
+            findings.push(finding(
+                Level::Error,
+                "PDA does not match the seeds declared in the IDL".into(),
+                Some(expected),
+                Some(actual.key.clone()),
+            ));
         }
     }
     findings
@@ -190,17 +202,17 @@ pub fn state_findings(
             }
         }
 
-        if account.writable && info.owner != SYSTEM {
-            if let Some(minimum) = rent(info.data.len()) {
-                if info.lamports < minimum {
-                    findings.push(finding(
-                        Level::Warn,
-                        "below the rent-exempt minimum".to_string(),
-                        Some(format!("{:.9} SOL", minimum as f64 / 1e9)),
-                        Some(format!("{:.9} SOL", info.lamports as f64 / 1e9)),
-                    ));
-                }
-            }
+        if account.writable
+            && info.owner != SYSTEM
+            && let Some(minimum) = rent(info.data.len())
+            && info.lamports < minimum
+        {
+            findings.push(finding(
+                Level::Warn,
+                "below the rent-exempt minimum".to_string(),
+                Some(format!("{:.9} SOL", minimum as f64 / 1e9)),
+                Some(format!("{:.9} SOL", info.lamports as f64 / 1e9)),
+            ));
         }
     }
     findings
