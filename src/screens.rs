@@ -881,8 +881,18 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
     ];
 
     if let Some(error) = &node.error {
+        let diagnosed = tx.failure.as_ref().filter(|failure| failure.node == Some(index));
         lines.push(Line::styled("ERROR", Style::new().fg(BAD)));
-        lines.push(Line::styled(error.clone(), Style::new().fg(BAD).bold()));
+        lines.push(Line::styled(
+            diagnosed.map_or_else(|| error.clone(), |failure| failure.headline.clone()),
+            Style::new().fg(BAD).bold(),
+        ));
+        if let Some(failure) = diagnosed {
+            if !failure.meaning.is_empty() {
+                lines.push(Line::styled(failure.meaning.clone(), muted()));
+            }
+            lines.push(Line::styled(error.clone(), muted()));
+        }
         lines.push(Line::raw(""));
     }
     lines.push(Line::styled(format!("ACCOUNTS ({})", node.accounts.len()), muted()));
