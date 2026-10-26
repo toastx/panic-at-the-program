@@ -164,6 +164,11 @@ fn rpc(cluster: &str, method: &str, params: Value) -> Result<Value, Box<dyn Erro
     Ok(value)
 }
 
+/// Whether a validator is answering on `cluster` right now.
+pub fn healthy(cluster: &str) -> bool {
+    rpc(cluster, "getHealth", json!([])).is_ok()
+}
+
 pub fn fetch(cluster: &str, signature: &str) -> Result<Value, Box<dyn Error>> {
     if let Some(value) = load(cluster, signature) {
         return Ok(value);

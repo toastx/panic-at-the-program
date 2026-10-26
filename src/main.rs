@@ -3,6 +3,7 @@ mod diagnose;
 mod idl;
 mod screens;
 mod solana;
+mod suite;
 mod ui;
 mod validate;
 mod workspace;
@@ -26,12 +27,22 @@ fn main() -> io::Result<()> {
     if signature.as_deref() == Some("rpc") {
         return rpc_command(&args.collect::<Vec<_>>());
     }
-    let cluster = args.next().unwrap_or_else(|| "devnet".to_string());
 
-    let mut app = App::new(cluster);
-    if let Some(signature) = &signature {
-        app.open(signature);
-    }
+    // Held until the TUI exits: dropping it kills the validator we started.
+    let mut _validator = None;
+    let mut app = if signature.as_deref() == Some("test") {
+        match test_command(&mut _validator)? {
+            Some(app) => app,
+            None => return Ok(()),
+        }
+    } else {
+        let cluster = args.next().unwrap_or_else(|| "devnet".to_string());
+        let mut app = App::new(cluster);
+        if let Some(signature) = &signature {
+            app.open(signature);
+        }
+        app
+    };
 
     enable_raw_mode()?;
     let mut out = io::stdout();
@@ -55,6 +66,53 @@ fn main() -> io::Result<()> {
     disable_raw_mode()?;
     execute!(term.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     term.show_cursor()
+}
+
+/// Runs the project's suite and opens the TUI on the first failed transaction
+/// found in its output. None means there was nothing to open.
+fn test_command(validator: &mut Option<suite::Validator>) -> io::Result<Option<App>> {
+    let root = workspace::project_root().unwrap_or_default();
+    let Some((framework, command)) = suite::detect(&root) else {
+        eprintln!(
+            "no test suite found in {} (looked for Anchor.toml, Cargo.toml)",
+            root.display()
+        );
+        std::process::exit(2);
+    };
+    if framework == "anchor" {
+        *validator = suite::Validator::start(&root)?;
+        if validator.is_none() {
+            eprintln!("solana-test-validator not on PATH — install it to keep failed transactions fetchable");
+            return Ok(None);
+        }
+        eprintln!("validator up on localnet");
+    }
+    eprintln!("{framework}: {} (in {})", command.join(" "), root.display());
+
+    let output = suite::run(&root, &command)
+        .map_err(|err| io::Error::new(err.kind(), format!("could not run `{}`: {err}", command[0])))?;
+    // Our own validator is still up, so prefer the real transaction over the one
+    // reconstructed from log lines: it carries accounts, balances and state diff.
+    let (cluster, keys) = match validator {
+        Some(_) => ("localnet", suite::failed_signatures(&output, "localnet")),
+        None => (suite::CLUSTER, Vec::new()),
+    };
+    let (cluster, keys) = if keys.is_empty() {
+        (suite::CLUSTER, suite::stash(&suite::cases(&output)))
+    } else {
+        (cluster, keys)
+    };
+
+    let Some(key) = keys.last().cloned() else {
+        print!("{output}");
+        eprintln!("no failed transaction in the output — nothing to diagnose");
+        return Ok(None);
+    };
+    eprintln!("{} failed transaction(s) on {cluster}", keys.len());
+
+    let mut app = App::new(cluster.to_string());
+    app.open_transaction(&key);
+    Ok(Some(app))
 }
 
 fn rpc_command(args: &[String]) -> io::Result<()> {

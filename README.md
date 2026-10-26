@@ -36,7 +36,16 @@ panic                          # open the TUI on devnet
 panic <signature>              # open a transaction
 panic <pubkey>                 # open an account
 panic <signature|pubkey> mainnet   # pick a cluster (mainnet, devnet, testnet, localnet, or a custom name)
+panic test                     # run the project's test suite and open its first failure
 ```
+
+### From the test suite
+
+`panic test` finds the suite (`Anchor.toml` → `anchor test`, otherwise `cargo test`), runs it, and opens the TUI on a failed transaction from its output.
+
+For Anchor it starts `solana-test-validator` itself and runs `anchor test --skip-local-validator`, so the failed transaction is still on the validator afterwards and opens with its accounts, balances and state diff. The validator is killed when you quit. An already-running localnet is reused instead of starting a second one.
+
+For `cargo test` suites (litesvm, `solana-program-test`, mollusk) there is no validator: the transaction is rebuilt from the program logs in the test output, under a `tests` cluster. Execution tree, logs and diagnosis work; accounts and balances are empty.
 
 ### Custom RPC endpoints
 
