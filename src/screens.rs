@@ -121,6 +121,27 @@ fn require_tx<'a>(f: &mut Frame, area: Rect, app: &'a App, title: &str) -> Optio
     }
 }
 
+/// Who paid, and what they had. A recorded pre-balance is what the chain saw; a
+/// live snapshot is only what the wallet held when we asked, which is all there
+/// is for a transaction that never landed. The wording keeps them apart.
+fn payer_line(tx: &crate::solana::Tx) -> Option<(String, String)> {
+    match (&tx.payer, tx.accounts.first(), tx.payer_live) {
+        (Some((key, lamports)), _, _) => Some((key.clone(), format!("held {:.4} SOL", lamports_sol(*lamports)))),
+        (None, Some(account), Some(lamports)) => Some((
+            account.key.clone(),
+            // "holds ... now (live)" against "held ..." carries the distinction:
+            // this transaction never landed, so it has no recorded pre-balance.
+            format!("holds {:.4} SOL now (live)", lamports_sol(lamports)),
+        )),
+        (None, Some(account), None) => Some((account.key.clone(), "balance unknown".to_string())),
+        (None, None, _) => None,
+    }
+}
+
+fn lamports_sol(lamports: u64) -> f64 {
+    lamports as f64 / 1e9
+}
+
 fn overview(f: &mut Frame, area: Rect, app: &mut App) {
     let Some(tx) = app.tx() else {
         let _ = require_tx(f, area, app, "OVERVIEW");
@@ -141,6 +162,8 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
                     .filter(|value| value.is_some())
                     .count() as u16
         }) + 5
+            + u16::from(payer_line(tx).is_some())
+            + u16::from(!tx.accounts_complete)
     };
     let movers_height = if movers.is_empty() { 0 } else { movers.len() as u16 + 3 };
 
@@ -246,6 +269,19 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
                     Style::new().fg(Color::Rgb(233, 164, 170)),
                 ),
             ]));
+        }
+        if let Some((key, balance)) = payer_line(tx) {
+            lines.push(Line::from(vec![
+                Span::styled(format!("   {:<9}", "payer"), muted()),
+                Span::styled(key, Style::new().fg(Color::Rgb(176, 180, 210))),
+                Span::styled(format!("  {balance}"), muted()),
+            ]));
+        }
+        if !tx.accounts_complete {
+            lines.push(Line::styled(
+                "   account list incomplete — address table lookups unresolved, account checks withheld".to_string(),
+                Style::new().fg(Color::Rgb(233, 196, 106)),
+            ));
         }
         if let Some(failure) = &tx.failure {
             for (label, value) in [

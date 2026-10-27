@@ -1,49 +1,70 @@
-//! Run the project's test suite, scrape SVM program logs out of the output, and
-//! rebuild each failed transaction as a `getTransaction` response so the whole
-//! TUI (execution tree, logs, diagnosis) works on a local test failure.
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
 /// Pseudo-cluster the reconstructed failures are cached under.
 pub const CLUSTER: &str = "tests";
 
+/// Placeholder the suite command carries until the tap replaces it with its url.
+pub const CLUSTER_ARG: &str = "localnet";
+
 pub struct Case {
     pub name: String,
-    pub logs: Vec<String>,
+    /// `None` when nothing reported logs, as opposed to reporting none.
+    pub logs: Option<Vec<String>>,
     pub err: Value,
-    pub cu: u32,
+    /// `None` when compute was never measured. Never defaulted to zero: the CU
+    /// panel reading 0 is not a claim, but a 0 we invented would be.
+    pub cu: Option<u64>,
+    /// `transaction.message`, when a real serialized transaction was decoded.
+    pub message: Option<Value>,
+    pub fee: Option<u64>,
+    /// False when the decoded account list could not be completed, so nothing
+    /// derived from account indexes may be shown.
+    pub accounts_complete: bool,
+    /// Lamports the fee payer held, read live off the validator. A snapshot, not
+    /// the transaction's pre-balance — a simulated transaction has none.
+    pub payer_live: Option<u64>,
 }
 
-/// Framework label plus the command that runs its suite. Anchor is pointed at a
-/// validator we own instead of the throwaway one it starts and tears down, so the
-/// signatures in its output are still fetchable once the suite is over.
-pub fn detect(root: &Path) -> Option<(&'static str, Vec<&'static str>)> {
+pub fn detect(root: &Path) -> Option<(&'static str, Vec<String>)> {
+    let owned = |args: &[&str]| args.iter().map(|arg| arg.to_string()).collect();
     if root.join("Anchor.toml").is_file() {
         return Some((
             "anchor",
-            vec![
+            owned(&[
                 "anchor",
                 "test",
                 "--skip-local-validator",
                 "--provider.cluster",
-                "localnet",
-            ],
+                CLUSTER_ARG,
+            ]),
         ));
     }
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
     let label = if manifest.contains("mollusk") {
+        //TODO
         "mollusk"
     } else {
         "cargo"
     };
-    Some((label, vec!["cargo", "test", "--", "--nocapture"]))
+    Some((label, owned(&["cargo", "test", "--", "--nocapture"])))
+}
+
+pub fn available(program: &str) -> bool {
+    Command::new(program)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
 }
 
 /// Combined stdout+stderr: frameworks split program logs across both.
-pub fn run(root: &Path, command: &[&str]) -> std::io::Result<String> {
-    let output = Command::new(command[0])
+pub fn run(root: &Path, command: &[String]) -> std::io::Result<String> {
+    let output = Command::new(&command[0])
         .args(&command[1..])
         .current_dir(root)
         // litesvm / solana-program-test only emit program logs at this level.
@@ -59,53 +80,101 @@ pub fn run(root: &Path, command: &[&str]) -> std::io::Result<String> {
     ))
 }
 
-/// A `solana-test-validator` that outlives the suite, so failed transactions can
-/// still be fetched with their accounts and balances. Killed on drop.
-pub struct Validator(Option<std::process::Child>);
+pub struct Validator(Arc<Mutex<Option<Child>>>);
+
+pub const TTL: u64 = 180;
+
+/// 100 SOL, the top-up for a provider wallet on a validator we did not start.
+const TOP_UP: u64 = 100_000_000_000;
+
+fn kill(slot: &Mutex<Option<Child>>) {
+    if let Some(mut child) = slot.lock().expect("validator lock").take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
 
 impl Validator {
-    /// Reuses whatever is already serving localnet; otherwise starts one and waits
-    /// for it to answer. `Ok(None)` means there was nothing to start and nothing
-    /// listening either.
     pub fn start(root: &Path) -> std::io::Result<Option<Self>> {
+        let wallet = wallet(root);
         if crate::solana::healthy("localnet") {
-            return Ok(Some(Validator(None)));
+            eprintln!("reusing the validator already serving localnet");
+            if let Some(wallet) = &wallet {
+                crate::solana::airdrop("localnet", wallet, TOP_UP);
+            }
+            return Ok(Some(Validator(Arc::default())));
         }
-        let child = Command::new("solana-test-validator")
+        let mut command = Command::new("solana-test-validator");
+        command
             .args(["--reset", "--quiet", "--ledger"])
-            .arg(root.join("test-ledger"))
-            .current_dir(root)
-            .stdout(std::process::Stdio::null())
-            .spawn();
+            .arg(root.join("test-ledger"));
+        if let Some(wallet) = &wallet {
+            command.args(["--mint", wallet]);
+        }
+        let child = command.current_dir(root).stdout(std::process::Stdio::null()).spawn();
         let child = match child {
             Ok(child) => child,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(err),
         };
-        let mut validator = Validator(Some(child));
+        let validator = Validator(Arc::new(Mutex::new(Some(child))));
         for _ in 0..100 {
             if crate::solana::healthy("localnet") {
                 return Ok(Some(validator));
             }
-            if let Some(status) = validator.0.as_mut().expect("child").try_wait()? {
+            let exited = validator
+                .0
+                .lock()
+                .expect("validator lock")
+                .as_mut()
+                .and_then(|child| child.try_wait().ok())
+                .flatten();
+            if let Some(status) = exited {
                 return Err(std::io::Error::other(format!("solana-test-validator exited: {status}")));
             }
             std::thread::sleep(std::time::Duration::from_millis(300));
         }
         Err(std::io::Error::other("solana-test-validator never became healthy"))
     }
+
+    /// Kills it `secs` from now, in the background.
+    pub fn expire_after(&self, secs: u64) {
+        let slot = Arc::clone(&self.0);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            kill(&slot);
+        });
+    }
+
+    /// Kills it now. Nothing left to fetch, so nothing to keep it up for.
+    pub fn stop(&self) {
+        kill(&self.0);
+    }
 }
 
 impl Drop for Validator {
     fn drop(&mut self) {
-        if let Some(child) = self.0.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        kill(&self.0);
     }
 }
 
-/// Base58 signatures in the output that localnet confirms as failed, newest last.
+fn wallet(root: &Path) -> Option<String> {
+    let configured = std::fs::read_to_string(root.join("Anchor.toml"))
+        .ok()
+        .and_then(|text| crate::workspace::parse(&text).get("provider")?.get("wallet").cloned())
+        .unwrap_or_else(|| "~/.config/solana/id.json".to_string()); // anchor's own default
+    let path = match configured.strip_prefix("~") {
+        Some(rest) => crate::workspace::home().join(rest.trim_start_matches(['/', std::path::MAIN_SEPARATOR])),
+        None => root.join(configured),
+    };
+    let output = Command::new("solana-keygen").arg("pubkey").arg(path).output().ok()?;
+    let address = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let plausible = (32..=44).contains(&address.len())
+        && address.chars().all(|c| c.is_ascii_alphanumeric())
+        && crate::solana::bs58_decode(&address).len() == 32;
+    plausible.then_some(address)
+}
+
 pub fn failed_signatures(output: &str, cluster: &str) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     for token in output.split(|c: char| !c.is_ascii_alphanumeric()) {
@@ -125,8 +194,30 @@ pub fn failed_signatures(output: &str, cluster: &str) -> Vec<String> {
     found
 }
 
-/// Strips whatever the framework wrapped a program log line in: a mocha quoted
-/// array entry, a `solana_logger` timestamp prefix, or nothing at all.
+fn program_ids(root: &Path, cluster: &str) -> Vec<String> {
+    std::fs::read_to_string(root.join("Anchor.toml"))
+        .map(|text| {
+            crate::workspace::parse(&text)
+                .remove(&format!("programs.{cluster}"))
+                .unwrap_or_default()
+                .into_values()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn failed_on_cluster(root: &Path, cluster: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for id in program_ids(root, cluster) {
+        for signature in crate::solana::failed_for_address(cluster, &id, 25) {
+            if !found.contains(&signature) && crate::solana::fetch(cluster, &signature).is_ok() {
+                found.push(signature);
+            }
+        }
+    }
+    found
+}
+
 fn log_line(line: &str) -> Option<&str> {
     let start = line.find("Program ")?;
     Some(line[start..].trim_end().trim_end_matches([',', '\'', '"', ' ']))
@@ -153,8 +244,6 @@ fn test_name(line: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
-/// `custom program error: 0x1771` -> `{"InstructionError": [0, {"Custom": 6001}]}`,
-/// anything else keeps the runtime's own wording.
 fn error_value(index: usize, message: &str) -> Value {
     let code = message
         .split_once("0x")
@@ -165,7 +254,6 @@ fn error_value(index: usize, message: &str) -> Value {
     }
 }
 
-/// One case per failed transaction found in the output.
 pub fn cases(output: &str) -> Vec<Case> {
     let lines: Vec<&str> = output.lines().collect();
     let names: Vec<(usize, String)> = lines
@@ -212,8 +300,12 @@ pub fn cases(output: &str) -> Vec<Case> {
                 Case {
                     name: String::new(),
                     err: error_value(0, message),
-                    logs,
-                    cu,
+                    logs: Some(logs),
+                    cu: Some(u64::from(cu)),
+                    message: None,
+                    fee: None,
+                    accounts_complete: true,
+                    payer_live: None,
                 },
             ));
         } else if depth == 0 {
@@ -223,12 +315,7 @@ pub fn cases(output: &str) -> Vec<Case> {
 
     let mut cases: Vec<Case> = Vec::new();
     for (index, mut case) in done {
-        // Nearest test name either side: cargo prints it before the logs, mocha after.
-        case.name = names
-            .iter()
-            .min_by_key(|(at, _)| at.abs_diff(index))
-            .map(|(_, name)| name.clone())
-            .unwrap_or_else(|| format!("failure {}", cases.len() + 1));
+        case.name = nearest_name(&names, index, cases.len());
         if !cases.iter().any(|seen| seen.logs == case.logs) {
             cases.push(case);
         }
@@ -236,25 +323,168 @@ pub fn cases(output: &str) -> Vec<Case> {
     cases
 }
 
-/// A `getTransaction` response carrying only what the logs can tell us.
+/// Cases from the recorded RPC conversation: the validator's own account of why
+/// each call failed, which the suite output no longer carries once anchor's
+/// client has turned it into a thrown string.
+pub fn captured(captures: &[crate::rpc_tap::Capture]) -> Vec<Case> {
+    let mut cases: Vec<Case> = Vec::new();
+    for capture in captures {
+        let logs = capture.logs.clone();
+        let err = match (&capture.err, &capture.rpc_error) {
+            (Some(err), _) => err.clone(),
+            // No simulation result: the call failed before execution, so the
+            // JSON-RPC message is the whole of what is known.
+            (None, Some(rpc)) => json!(rpc["message"].as_str().unwrap_or("rpc error")),
+            (None, None) => continue,
+        };
+        let name = logs
+            .iter()
+            .flatten()
+            .find_map(|line| {
+                line.split_once("Program log: Instruction: ")
+                    .map(|(_, name)| name.trim().to_string())
+            })
+            .unwrap_or_else(|| format!("failure {}", cases.len() + 1));
+        // Two tests can fail the same instruction, and keys come from the name.
+        let taken = cases.iter().filter(|seen| seen.name.starts_with(&name)).count();
+        let decoded = capture.transaction.as_ref().and_then(|(transaction, encoding)| {
+            let bytes = match encoding.as_str() {
+                "base64" => crate::solana::base64_decode(transaction),
+                _ => crate::solana::bs58_decode(transaction),
+            };
+            crate::solana::decode_message(&bytes)
+        });
+        let complete = decoded.as_ref().is_none_or(|message| message.accounts_complete);
+        let message = decoded.map(|message| {
+            let mut json = message.json;
+            if !message.accounts_complete {
+                // The indexes may point at addresses the message never carried.
+                json["instructions"] = json!([]);
+            }
+            json
+        });
+        cases.push(Case {
+            name: match taken {
+                0 => name,
+                n => format!("{name} {}", n + 1),
+            },
+            err,
+            logs,
+            cu: capture.cu,
+            message,
+            fee: capture.fee,
+            accounts_complete: complete,
+            payer_live: None,
+        });
+    }
+    cases
+}
+
+/// Reads what each case's fee payer holds, while the validator is still up. The
+/// payer is whoever the decoded message says signed — not a wallet we assumed.
+/// The response is also cached under our own cluster, because the validator is
+/// gone by the time anyone clicks that account in the TUI.
+pub fn add_payer_balance(cases: &mut [Case], cluster: &str) {
+    for case in cases {
+        let Some(key) = case
+            .message
+            .as_ref()
+            .and_then(|message| message["accountKeys"][0].as_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let cached = format!("account-{key}");
+        // That cache never expires, and last run's balance would be a lie.
+        crate::solana::evict(cluster, &cached);
+        let Ok(value) = crate::solana::fetch_account(cluster, &key) else {
+            continue;
+        };
+        let _ = crate::solana::store(CLUSTER, &cached, &value);
+        case.payer_live = Some(crate::solana::parse_account(&key, &value).lamports);
+    }
+}
+
+pub fn anchor_failures(root: &Path, output: &str) -> Vec<Case> {
+    let id = program_ids(root, "localnet")
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "unknown".to_string());
+    let lines: Vec<&str> = output.lines().collect();
+    let names: Vec<(usize, String)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, line)| test_name(line).map(|name| (i, name)))
+        .collect();
+
+    let mut cases: Vec<Case> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let Some(start) = line.find("AnchorError") else {
+            continue;
+        };
+        let message = line[start..].trim();
+        let Some(code) = message
+            .split_once("Error Number: ")
+            .and_then(|(_, rest)| rest.split('.').next()?.trim().parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let logs = vec![
+            format!("Program {id} invoke [1]"),
+            format!("Program log: {message}"),
+            format!("Program {id} failed: custom program error: {code:#x}"),
+        ];
+        if cases.iter().any(|seen| seen.logs.as_ref() == Some(&logs)) {
+            continue;
+        }
+        cases.push(Case {
+            name: nearest_name(&names, index, cases.len()),
+            err: json!({"InstructionError": [0, {"Custom": code}]}),
+            logs: Some(logs),
+            cu: None,
+            message: None,
+            fee: None,
+            accounts_complete: true,
+            payer_live: None,
+        });
+    }
+    cases
+}
+
+fn nearest_name(names: &[(usize, String)], index: usize, nth: usize) -> String {
+    names
+        .iter()
+        .min_by_key(|(at, _)| at.abs_diff(index))
+        .map(|(_, name)| name.clone())
+        .unwrap_or_else(|| format!("failure {}", nth + 1))
+}
+
+/// A `getTransaction` response carrying only what we were actually told. Absent
+/// evidence is left out rather than zeroed: a 0 we invented would read as a
+/// measurement, and `parse` tolerates every one of these keys being missing.
 fn transaction_json(case: &Case) -> Value {
-    json!({"result": {
-        "slot": 0,
-        "meta": {
-            "err": case.err,
-            "fee": 0,
-            "computeUnitsConsumed": case.cu,
-            "logMessages": case.logs,
-            "preBalances": [],
-            "postBalances": [],
-            "innerInstructions": [],
-        },
-        "transaction": {"message": {
+    let mut meta = json!({"err": case.err});
+    if let Some(logs) = &case.logs {
+        meta["logMessages"] = json!(logs);
+    }
+    if let Some(cu) = case.cu {
+        meta["computeUnitsConsumed"] = json!(cu);
+    }
+    if let Some(fee) = case.fee {
+        meta["fee"] = json!(fee);
+    }
+    let message = case.message.clone().unwrap_or_else(|| {
+        json!({
             "accountKeys": [],
             "instructions": [],
             "header": {"numRequiredSignatures": 0, "numReadonlySignedAccounts": 0, "numReadonlyUnsignedAccounts": 0},
-        }},
-    }})
+        })
+    });
+    // Ours, not the RPC's: a live balance snapshot and a completeness flag have no
+    // place in `meta`, which is supposed to be what the chain recorded.
+    let mut value = json!({"result": {"slot": 0, "meta": meta, "transaction": {"message": message}}});
+    value["patp"] = json!({"payerBalance": case.payer_live, "accountsComplete": case.accounts_complete});
+    value
 }
 
 fn key(name: &str) -> String {
@@ -265,8 +495,6 @@ fn key(name: &str) -> String {
     key.trim_matches('-').chars().take(60).collect()
 }
 
-/// Caches each case so `App::open_transaction` can load it like any signature.
-/// Returns the keys, most recently failed first.
 pub fn stash(cases: &[Case]) -> Vec<String> {
     cases
         .iter()
@@ -304,14 +532,112 @@ Error: AnchorError caused by account: vault. Error Code: ConstraintSeeds. Error 
 [2026-10-26T00:00:00Z DEBUG solana_runtime::message_processor::stable_log] Program 11111111111111111111111111111111 failed: insufficient funds for instruction
 "#;
 
+    // What ts-mocha prints when `.rpc()` fails preflight: no signature, no program
+    // logs, just the translated error.
+    const PREFLIGHT: &str = r#"
+  vault
+    ✔ initializes the vault (139ms)
+    1) deposits into the vault
+    2) withdraws more than the balance
+
+  1) vault
+       deposits into the vault:
+     Error: AnchorError caused by account: vault. Error Code: AccountNotInitialized. Error Number: 3012. Error Message: The program expected this account to be already initialized.
+      at AnchorError.parse (node_modules/@coral-xyz/anchor/src/error.ts:168:14)
+
+  2) vault
+       withdraws more than the balance:
+     Error: AnchorError thrown in programs/vault/src/lib.rs:32. Error Code: InsufficientFunds. Error Number: 6002. Error Message: vault balance is lower than the requested amount.
+      at AnchorError.parse (node_modules/@coral-xyz/anchor/src/error.ts:152:14)
+"#;
+
+    #[test]
+    fn preflight_errors_rebuild_without_logs_or_signatures() {
+        // nothing for the log scraper to find
+        assert!(super::cases(PREFLIGHT).is_empty());
+
+        let root = std::path::Path::new("example-tests/anchor-vault");
+        let cases = super::anchor_failures(root, PREFLIGHT);
+        assert_eq!(cases.len(), 2);
+        assert_eq!(cases[0].err["InstructionError"][1]["Custom"], 3012);
+        assert_eq!(cases[1].err["InstructionError"][1]["Custom"], 6002);
+
+        // and they drive the normal parse + diagnose path
+        let tx = crate::solana::parse("deposit", super::CLUSTER, &super::transaction_json(&cases[0]));
+        let failure = tx.failure.expect("diagnosed");
+        assert!(
+            failure.headline.starts_with("AccountNotInitialized"),
+            "{}",
+            failure.headline
+        );
+        assert_eq!(failure.account.as_deref(), Some("vault"));
+    }
+
+    /// The deterministic part: each error class is a real recorded RPC envelope
+    /// replayed through the same pipeline, with no validator and no network. A
+    /// new class is a new envelope, not new code. Each row asserts only the
+    /// evidence that envelope genuinely carried.
+    #[test]
+    fn every_error_class_diagnoses_from_its_recorded_envelope() {
+        use crate::rpc_tap;
+
+        let rebuild = |request: &str, response: &str| {
+            let capture = rpc_tap::capture(request.as_bytes(), response.as_bytes()).expect("captured");
+            let cases = super::captured(std::slice::from_ref(&capture));
+            let case = cases.into_iter().next().expect("one case");
+            let tx = crate::solana::parse("t", super::CLUSTER, &super::transaction_json(&case));
+            (case, tx)
+        };
+
+        for (response, headline, cu, instruction) in [
+            (rpc_tap::SEND_ZERO_AMOUNT, "ZeroAmount", 4340, "Deposit"),
+            (rpc_tap::SEND_INSUFFICIENT_FUNDS, "InsufficientFunds", 4367, "Withdraw"),
+            (rpc_tap::SEND_NOT_INITIALIZED, "AccountNotInitialized", 2471, "Deposit"),
+        ] {
+            let (case, tx) = rebuild(rpc_tap::SEND_REQUEST, response);
+            let failure = tx.failure.as_ref().expect("diagnosed");
+            assert!(failure.headline.starts_with(headline), "{}", failure.headline);
+            // the evidence the suite's own output had lost
+            assert_eq!(tx.cu, cu, "compute units, as the validator measured them");
+            assert_eq!(tx.fee, 5000);
+            assert!(!tx.logs.is_empty(), "real program logs");
+            assert_eq!(tx.nodes.len(), 1, "an execution tree, from those logs");
+            // and the accounts, decoded from the request's own transaction
+            assert_eq!(tx.accounts.len(), 3);
+            assert_eq!(tx.accounts[0].key, "4AvpokDPwAV5MBwY4VahxddcDF9AHJHCDbpbUdfUpjWa");
+            assert_eq!(tx.accounts[0].role(), "signer, writable");
+            assert!(tx.accounts_complete);
+            assert_eq!(case.name, instruction, "named after the instruction that failed");
+        }
+
+        // A failure before execution: nothing ran, so nothing is claimed to have.
+        let (_, tx) = rebuild(rpc_tap::BARE_REQUEST, rpc_tap::SIG_VERIFY);
+        let failure = tx.failure.as_ref().expect("diagnosed");
+        assert!(
+            failure.headline.contains("signature verification"),
+            "{}",
+            failure.headline
+        );
+        assert!(tx.logs.is_empty(), "no logs were reported, and none are invented");
+        assert_eq!(tx.cu, 0);
+        assert!(tx.accounts.is_empty(), "no transaction was decodable");
+        assert!(tx.payer.is_none());
+    }
+
+    #[test]
+    fn available_distinguishes_missing_from_failing() {
+        assert!(super::available("cargo"));
+        assert!(!super::available("panic-no-such-program"));
+    }
+
     #[test]
     fn scrapes_failures_from_both_report_styles() {
         let cases = super::cases(MOCHA);
         assert_eq!(cases.len(), 1);
         assert_eq!(cases[0].name, "deposits into the vault");
-        assert_eq!(cases[0].cu, 4521);
+        assert_eq!(cases[0].cu, Some(4521));
         assert_eq!(cases[0].err["InstructionError"][1]["Custom"], 2006);
-        assert_eq!(cases[0].logs.len(), 5);
+        assert_eq!(cases[0].logs.as_deref().map(<[String]>::len), Some(5));
         assert_eq!(super::key(&cases[0].name), "deposits-into-the-vault");
 
         let cases = super::cases(CARGO);

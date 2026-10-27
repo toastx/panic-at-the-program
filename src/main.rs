@@ -1,6 +1,7 @@
 mod app;
 mod diagnose;
 mod idl;
+mod rpc_tap;
 mod screens;
 mod solana;
 mod suite;
@@ -72,13 +73,23 @@ fn main() -> io::Result<()> {
 /// found in its output. None means there was nothing to open.
 fn test_command(validator: &mut Option<suite::Validator>) -> io::Result<Option<App>> {
     let root = workspace::project_root().unwrap_or_default();
-    let Some((framework, command)) = suite::detect(&root) else {
+    let Some((framework, mut command)) = suite::detect(&root) else {
         eprintln!(
             "no test suite found in {} (looked for Anchor.toml, Cargo.toml)",
             root.display()
         );
         std::process::exit(2);
     };
+    if !suite::available(&command[0]) {
+        eprintln!(
+            "`{}` not on PATH — is it installed where you are running panic?",
+            command[0]
+        );
+        if cfg!(windows) {
+            eprintln!("anchor is usually a WSL install: run panic inside WSL, from /mnt/<drive>/...");
+        }
+        std::process::exit(2);
+    }
     if framework == "anchor" {
         *validator = suite::Validator::start(&root)?;
         if validator.is_none() {
@@ -87,6 +98,23 @@ fn test_command(validator: &mut Option<suite::Validator>) -> io::Result<Option<A
         }
         eprintln!("validator up on localnet");
     }
+
+    // With the suite pointed at the tap we hear what the validator told it. Its
+    // own output is a lossy witness: anchor's client throws the simulation result
+    // away and mocha prints a sentence.
+    let tap = validator
+        .as_ref()
+        .and_then(|_| rpc_tap::upstreams(&solana::cluster_url("localnet")))
+        .and_then(|(http, ws)| rpc_tap::Tap::start(&http, &ws).ok());
+    match (&tap, command.iter().position(|arg| arg == suite::CLUSTER_ARG)) {
+        (Some(tap), Some(at)) => {
+            command[at] = tap.url();
+            eprintln!("rpc tap on {}", tap.url());
+        }
+        // Without the tap the suite talks to the validator directly and we are
+        // back to scraping its output.
+        _ => eprintln!("no rpc tap — falling back to the suite's own output"),
+    }
     eprintln!("{framework}: {} (in {})", command.join(" "), root.display());
 
     let output = suite::run(&root, &command)
@@ -94,14 +122,55 @@ fn test_command(validator: &mut Option<suite::Validator>) -> io::Result<Option<A
     // Our own validator is still up, so prefer the real transaction over the one
     // reconstructed from log lines: it carries accounts, balances and state diff.
     let (cluster, keys) = match validator {
-        Some(_) => ("localnet", suite::failed_signatures(&output, "localnet")),
+        Some(_) => {
+            let mut keys = suite::failed_signatures(&output, "localnet");
+            if keys.is_empty() {
+                // Anchor's client throws a translated error, so the suite output
+                // names neither the signature nor the logs: ask the validator
+                // what failed against the programs this workspace deploys.
+                keys = suite::failed_on_cluster(&root, "localnet");
+            }
+            ("localnet", keys)
+        }
         None => (suite::CLUSTER, Vec::new()),
     };
     let (cluster, keys) = if keys.is_empty() {
-        (suite::CLUSTER, suite::stash(&suite::cases(&output)))
+        // Best evidence first: what the validator said, then program logs the
+        // suite happened to print, then the error text as a last resort.
+        let mut cases = tap
+            .as_ref()
+            .map(|tap| suite::captured(&tap.failures()))
+            .unwrap_or_default();
+        let mut source = "the rpc tap";
+        if validator.is_some() {
+            // Still up, so the payer's balance is still readable.
+            suite::add_payer_balance(&mut cases, "localnet");
+        }
+        if cases.is_empty() {
+            cases = suite::cases(&output);
+            source = "program logs in the suite output";
+        }
+        if cases.is_empty() {
+            cases = suite::anchor_failures(&root, &output);
+            source = "anchor error text (no logs or accounts available)";
+        }
+        if !cases.is_empty() {
+            eprintln!("{} case(s) from {source}", cases.len());
+        }
+        (suite::CLUSTER, suite::stash(&cases))
     } else {
         (cluster, keys)
     };
+
+    // Nothing more will be fetched off localnet once we fall back to the cases
+    // rebuilt from log lines, so the validator has no reason to stay up.
+    if let Some(validator) = validator.as_ref() {
+        if cluster == suite::CLUSTER {
+            validator.stop();
+        } else {
+            validator.expire_after(suite::TTL);
+        }
+    }
 
     let Some(key) = keys.last().cloned() else {
         print!("{output}");
@@ -1569,6 +1638,99 @@ mod tests {
             _ => None,
         });
         assert!(inspect.count() >= 3);
+    }
+
+    #[test]
+    fn a_serialized_transaction_decodes_into_accounts_and_instructions() {
+        // the transaction from a recorded sendTransaction, legacy format
+        let request: Value = serde_json::from_str(rpc_tap::SEND_REQUEST).expect("json");
+        let bytes = solana::base64_decode(request["params"][0].as_str().expect("base64"));
+        let message = solana::decode_message(&bytes).expect("decoded");
+        assert!(message.accounts_complete);
+        assert_eq!(
+            message.json["accountKeys"][0],
+            "4AvpokDPwAV5MBwY4VahxddcDF9AHJHCDbpbUdfUpjWa"
+        );
+        assert_eq!(
+            message.json["accountKeys"][2],
+            "2dMxE4PyZtESZXUzKktvUUUd27WoYyhs1Pb6L3aPYGf5"
+        );
+        assert_eq!(message.json["header"]["numRequiredSignatures"], 1);
+        assert_eq!(message.json["instructions"][0]["accounts"], json!([1, 0]));
+
+        // and it feeds the normal parse, so the payer reads as the payer
+        let tx = solana::parse(
+            "t",
+            "tests",
+            &json!({"result": {"transaction": {"message": message.json}, "meta": {"err": Value::Null}}}),
+        );
+        assert_eq!(tx.accounts.len(), 3);
+        assert_eq!(tx.accounts[0].role(), "signer, writable");
+
+        // A v0 message naming a lookup table it does not carry: the static keys
+        // are real, but an instruction index may point past them, so the account
+        // mapping is marked short rather than quietly presented as whole.
+        let mut v0: Vec<u8> = vec![1];
+        v0.extend(std::iter::repeat_n(0u8, 64));
+        v0.push(0x80);
+        v0.extend([1, 0, 1]);
+        v0.push(2);
+        v0.extend(std::iter::repeat_n(7u8, 32));
+        v0.extend(std::iter::repeat_n(8u8, 32));
+        v0.extend(std::iter::repeat_n(9u8, 32));
+        v0.extend([1, 1, 1, 0, 0]); // one instruction: program 1, one account, no data
+        v0.push(1); // one lookup table
+        v0.extend(std::iter::repeat_n(5u8, 32));
+        v0.extend([1, 0]); // one writable index
+        v0.push(0); // no readonly indexes
+        let message = solana::decode_message(&v0).expect("decoded");
+        assert!(!message.accounts_complete, "a loaded address we cannot see");
+        assert_eq!(message.json["accountKeys"].as_array().map(Vec::len), Some(2));
+
+        assert!(solana::decode_message(b"nowhere near a transaction").is_none());
+    }
+
+    #[test]
+    fn the_overview_names_the_payer_and_what_it_held() {
+        // a real transaction: preBalances[0] is what the chain recorded
+        let mut app = loaded();
+        app.goto(Screen::Overview);
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("payer"), "{screen}");
+        assert!(screen.contains("held 1.0000 SOL"), "{screen}");
+
+        // one that never landed: a live snapshot, said to be one
+        let mut app = App::new("tests".into());
+        app.tx = Some(solana::parse(
+            "t",
+            "tests",
+            &json!({
+                "result": {
+                    "meta": {
+                        "err": {"InstructionError": [0, {"Custom": 6000}]},
+                        "logMessages": [
+                            "Program Vau1t11111111111111111111111111111111111 invoke [1]",
+                            "Program log: Instruction: Deposit",
+                            "Program Vau1t11111111111111111111111111111111111 failed: custom program error: 0x1770",
+                        ],
+                    },
+                    "transaction": {"message": {
+                        "accountKeys": ["4AvpokDPwAV5MBwY4VahxddcDF9AHJHCDbpbUdfUpjWa"],
+                        "instructions": [],
+                        "header": {"numRequiredSignatures": 1, "numReadonlySignedAccounts": 0, "numReadonlyUnsignedAccounts": 0},
+                    }},
+                },
+                "patp": {"payerBalance": 2_500_000_000u64, "accountsComplete": true},
+            }),
+        ));
+        app.kind = solana::Kind::Tx;
+        app.goto(Screen::Overview);
+        let screen = render(&mut app, 120, 34);
+        assert!(
+            screen.contains("4AvpokDPwAV5MBwY4VahxddcDF9AHJHCDbpbUdfUpjWa"),
+            "{screen}"
+        );
+        assert!(screen.contains("holds 2.5000 SOL now (live)"), "{screen}");
     }
 
     #[test]

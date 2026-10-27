@@ -59,6 +59,15 @@ pub struct Tx {
     pub accounts: Vec<Account>,
     pub balances: Vec<BalanceChange>,
     pub logs: Vec<String>,
+    /// Fee payer and what it held: accountKeys[0] with preBalances[0], which is
+    /// what the chain recorded. None when the response carried neither.
+    pub payer: Option<(String, u64)>,
+    /// Lamports the payer held when we looked, for transactions that never
+    /// landed and so have no recorded balance. A snapshot, labelled as one.
+    pub payer_live: Option<u64>,
+    /// False when the account list is known to be short of what the transaction
+    /// actually loaded, so account-derived findings must be withheld.
+    pub accounts_complete: bool,
 }
 
 fn cache_dir() -> PathBuf {
@@ -80,7 +89,7 @@ pub fn cached(cluster: &str) -> Vec<String> {
             Some((e.metadata().ok()?.modified().ok()?, key))
         })
         .collect();
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.sort_by_key(|a| std::cmp::Reverse(a.0));
     entries.into_iter().map(|(_, key)| key).collect()
 }
 
@@ -167,6 +176,30 @@ fn rpc(cluster: &str, method: &str, params: Value) -> Result<Value, Box<dyn Erro
 /// Whether a validator is answering on `cluster` right now.
 pub fn healthy(cluster: &str) -> bool {
     rpc(cluster, "getHealth", json!([])).is_ok()
+}
+
+/// Signatures of this address's recent failed transactions, newest last. The
+/// suite's own output may name none of them: anchor's client throws a translated
+/// error and mocha prints that, not the signature or the program logs.
+pub fn failed_for_address(cluster: &str, address: &str, limit: usize) -> Vec<String> {
+    let Ok(value) = rpc(cluster, "getSignaturesForAddress", json!([address, {"limit": limit}])) else {
+        return Vec::new();
+    };
+    let mut found: Vec<String> = value["result"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter(|entry| !entry["err"].is_null())
+        .filter_map(|entry| entry["signature"].as_str().map(str::to_string))
+        .collect();
+    found.reverse();
+    found
+}
+
+/// Best effort top-up: a validator that refuses airdrops is not our problem, the
+/// suite will say so itself.
+pub fn airdrop(cluster: &str, pubkey: &str, lamports: u64) -> bool {
+    rpc(cluster, "requestAirdrop", json!([pubkey, lamports])).is_ok()
 }
 
 pub fn fetch(cluster: &str, signature: &str) -> Result<Value, Box<dyn Error>> {
@@ -573,6 +606,18 @@ pub fn parse(signature: &str, cluster: &str, value: &Value) -> Tx {
         failed_node,
         failure,
         balances: balance_changes(result, &keys),
+        payer: match (
+            keys.first(),
+            result.pointer("/meta/preBalances/0").and_then(Value::as_u64),
+        ) {
+            (Some(account), Some(lamports)) => Some((account.key.clone(), lamports)),
+            _ => None,
+        },
+        payer_live: value.pointer("/patp/payerBalance").and_then(Value::as_u64),
+        accounts_complete: value
+            .pointer("/patp/accountsComplete")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
         accounts: keys,
         logs,
         nodes,
@@ -659,6 +704,102 @@ pub fn base64_decode(input: &str) -> Vec<u8> {
         }
     }
     out
+}
+
+/// `transaction.message` recovered from a serialized transaction, in the shape
+/// `parse` reads.
+pub struct Message {
+    pub json: Value,
+    /// False when the account list cannot be completed: a versioned transaction
+    /// carries address-table *descriptors*, not the keys those tables resolve to,
+    /// while instruction indexes may point at them. Nothing that needs the full
+    /// mapping may be derived from such a message.
+    pub accounts_complete: bool,
+}
+
+/// Decodes a wire-format transaction far enough to recover its message. None when
+/// the bytes are not a transaction we can read — never a partial guess.
+pub fn decode_message(bytes: &[u8]) -> Option<Message> {
+    let mut at = 0usize;
+    let signatures = shortvec(bytes, &mut at)?;
+    at = at.checked_add(signatures.checked_mul(64)?)?;
+
+    // A leading high bit marks a versioned message; legacy messages start with
+    // the header itself.
+    let versioned = bytes.get(at)? & 0x80 != 0;
+    if versioned {
+        at += 1;
+    }
+    let header = bytes.get(at..at.checked_add(3)?)?.to_vec();
+    at += 3;
+
+    let count = shortvec(bytes, &mut at)?;
+    let mut keys: Vec<String> = Vec::with_capacity(count.min(256));
+    for _ in 0..count {
+        keys.push(bs58_encode(bytes.get(at..at.checked_add(32)?)?));
+        at += 32;
+    }
+    at = at.checked_add(32)?; // recent blockhash
+
+    let count = shortvec(bytes, &mut at)?;
+    let mut instructions: Vec<Value> = Vec::with_capacity(count.min(64));
+    for _ in 0..count {
+        let program = *bytes.get(at)?;
+        at += 1;
+        let len = shortvec(bytes, &mut at)?;
+        let accounts: Vec<u64> = bytes
+            .get(at..at.checked_add(len)?)?
+            .iter()
+            .map(|index| u64::from(*index))
+            .collect();
+        at += len;
+        let len = shortvec(bytes, &mut at)?;
+        let data = bs58_encode(bytes.get(at..at.checked_add(len)?)?);
+        at += len;
+        instructions.push(json!({"programIdIndex": program, "accounts": accounts, "data": data}));
+    }
+
+    // The lookups name their tables but not their contents, so any that actually
+    // load addresses leave us with an account list we cannot complete.
+    let mut accounts_complete = true;
+    if versioned {
+        let tables = shortvec(bytes, &mut at)?;
+        for _ in 0..tables {
+            at = at.checked_add(32)?;
+            let writable = shortvec(bytes, &mut at)?;
+            at = at.checked_add(writable)?;
+            let readonly = shortvec(bytes, &mut at)?;
+            at = at.checked_add(readonly)?;
+            accounts_complete = accounts_complete && writable == 0 && readonly == 0;
+        }
+    }
+
+    Some(Message {
+        json: json!({
+            "accountKeys": keys,
+            "instructions": instructions,
+            "header": {
+                "numRequiredSignatures": header[0],
+                "numReadonlySignedAccounts": header[1],
+                "numReadonlyUnsignedAccounts": header[2],
+            },
+        }),
+        accounts_complete,
+    })
+}
+
+/// Compact-u16: seven bits per byte, high bit continues.
+fn shortvec(bytes: &[u8], at: &mut usize) -> Option<usize> {
+    let mut value = 0usize;
+    for shift in 0..3 {
+        let byte = *bytes.get(*at)?;
+        *at += 1;
+        value |= usize::from(byte & 0x7f) << (shift * 7);
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
 }
 
 pub fn is_signature(input: &str) -> bool {
