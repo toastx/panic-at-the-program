@@ -32,9 +32,6 @@ pub struct Capture {
     pub fee: Option<u64>,
     /// The serialized transaction from the request, still encoded.
     pub transaction: Option<(String, String)>,
-    /// The signature the RPC accepted for submission. Acceptance is not
-    /// confirmation: it does not say the transaction was processed.
-    pub accepted: Option<String>,
 }
 
 pub struct Tap {
@@ -252,7 +249,6 @@ pub fn capture(request: &[u8], response: &[u8]) -> Option<Capture> {
         capture.rpc_error = Some(error.clone());
         error.get("data").cloned()
     } else {
-        capture.accepted = response["result"].as_str().map(str::to_string);
         response.pointer("/result/value").cloned()
     };
 

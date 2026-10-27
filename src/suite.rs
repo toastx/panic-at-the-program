@@ -194,30 +194,6 @@ pub fn failed_signatures(output: &str, cluster: &str) -> Vec<String> {
     found
 }
 
-fn program_ids(root: &Path, cluster: &str) -> Vec<String> {
-    std::fs::read_to_string(root.join("Anchor.toml"))
-        .map(|text| {
-            crate::workspace::parse(&text)
-                .remove(&format!("programs.{cluster}"))
-                .unwrap_or_default()
-                .into_values()
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-pub fn failed_on_cluster(root: &Path, cluster: &str) -> Vec<String> {
-    let mut found: Vec<String> = Vec::new();
-    for id in program_ids(root, cluster) {
-        for signature in crate::solana::failed_for_address(cluster, &id, 25) {
-            if !found.contains(&signature) && crate::solana::fetch(cluster, &signature).is_ok() {
-                found.push(signature);
-            }
-        }
-    }
-    found
-}
-
 fn log_line(line: &str) -> Option<&str> {
     let start = line.find("Program ")?;
     Some(line[start..].trim_end().trim_end_matches([',', '\'', '"', ' ']))
@@ -405,52 +381,6 @@ pub fn add_payer_balance(cases: &mut [Case], cluster: &str) {
     }
 }
 
-pub fn anchor_failures(root: &Path, output: &str) -> Vec<Case> {
-    let id = program_ids(root, "localnet")
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| "unknown".to_string());
-    let lines: Vec<&str> = output.lines().collect();
-    let names: Vec<(usize, String)> = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(i, line)| test_name(line).map(|name| (i, name)))
-        .collect();
-
-    let mut cases: Vec<Case> = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        let Some(start) = line.find("AnchorError") else {
-            continue;
-        };
-        let message = line[start..].trim();
-        let Some(code) = message
-            .split_once("Error Number: ")
-            .and_then(|(_, rest)| rest.split('.').next()?.trim().parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let logs = vec![
-            format!("Program {id} invoke [1]"),
-            format!("Program log: {message}"),
-            format!("Program {id} failed: custom program error: {code:#x}"),
-        ];
-        if cases.iter().any(|seen| seen.logs.as_ref() == Some(&logs)) {
-            continue;
-        }
-        cases.push(Case {
-            name: nearest_name(&names, index, cases.len()),
-            err: json!({"InstructionError": [0, {"Custom": code}]}),
-            logs: Some(logs),
-            cu: None,
-            message: None,
-            fee: None,
-            accounts_complete: true,
-            payer_live: None,
-        });
-    }
-    cases
-}
-
 fn nearest_name(names: &[(usize, String)], index: usize, nth: usize) -> String {
     names
         .iter()
@@ -531,47 +461,6 @@ Error: AnchorError caused by account: vault. Error Code: ConstraintSeeds. Error 
 [2026-10-26T00:00:00Z DEBUG solana_runtime::message_processor::stable_log] Program 11111111111111111111111111111111 consumed 150 of 200000 compute units
 [2026-10-26T00:00:00Z DEBUG solana_runtime::message_processor::stable_log] Program 11111111111111111111111111111111 failed: insufficient funds for instruction
 "#;
-
-    // What ts-mocha prints when `.rpc()` fails preflight: no signature, no program
-    // logs, just the translated error.
-    const PREFLIGHT: &str = r#"
-  vault
-    ✔ initializes the vault (139ms)
-    1) deposits into the vault
-    2) withdraws more than the balance
-
-  1) vault
-       deposits into the vault:
-     Error: AnchorError caused by account: vault. Error Code: AccountNotInitialized. Error Number: 3012. Error Message: The program expected this account to be already initialized.
-      at AnchorError.parse (node_modules/@coral-xyz/anchor/src/error.ts:168:14)
-
-  2) vault
-       withdraws more than the balance:
-     Error: AnchorError thrown in programs/vault/src/lib.rs:32. Error Code: InsufficientFunds. Error Number: 6002. Error Message: vault balance is lower than the requested amount.
-      at AnchorError.parse (node_modules/@coral-xyz/anchor/src/error.ts:152:14)
-"#;
-
-    #[test]
-    fn preflight_errors_rebuild_without_logs_or_signatures() {
-        // nothing for the log scraper to find
-        assert!(super::cases(PREFLIGHT).is_empty());
-
-        let root = std::path::Path::new("example-tests/anchor-vault");
-        let cases = super::anchor_failures(root, PREFLIGHT);
-        assert_eq!(cases.len(), 2);
-        assert_eq!(cases[0].err["InstructionError"][1]["Custom"], 3012);
-        assert_eq!(cases[1].err["InstructionError"][1]["Custom"], 6002);
-
-        // and they drive the normal parse + diagnose path
-        let tx = crate::solana::parse("deposit", super::CLUSTER, &super::transaction_json(&cases[0]));
-        let failure = tx.failure.expect("diagnosed");
-        assert!(
-            failure.headline.starts_with("AccountNotInitialized"),
-            "{}",
-            failure.headline
-        );
-        assert_eq!(failure.account.as_deref(), Some("vault"));
-    }
 
     /// The deterministic part: each error class is a real recorded RPC envelope
     /// replayed through the same pipeline, with no validator and no network. A

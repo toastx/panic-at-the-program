@@ -75,7 +75,7 @@ fn cache_dir() -> PathBuf {
 }
 
 fn cache_path(cluster: &str, key: &str) -> PathBuf {
-    cache_dir().join(cluster).join(format!("{key}.json.z"))
+    cache_dir().join(cluster).join(format!("{key}.json"))
 }
 
 pub fn cached(cluster: &str) -> Vec<String> {
@@ -85,7 +85,7 @@ pub fn cached(cluster: &str) -> Vec<String> {
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().into_string().ok()?;
-            let key = name.strip_suffix(".json.z")?.to_string();
+            let key = name.strip_suffix(".json")?.to_string();
             Some((e.metadata().ok()?.modified().ok()?, key))
         })
         .collect();
@@ -146,16 +146,13 @@ pub fn entries(cluster: &str) -> Vec<Entry> {
 }
 
 pub fn load(cluster: &str, key: &str) -> Option<Value> {
-    let file = fs::File::open(cache_path(cluster, key)).ok()?;
-    serde_json::from_reader(flate2::read::ZlibDecoder::new(file)).ok()
+    serde_json::from_reader(fs::File::open(cache_path(cluster, key)).ok()?).ok()
 }
 
 pub fn store(cluster: &str, key: &str, value: &Value) -> io::Result<()> {
     let path = cache_path(cluster, key);
     fs::create_dir_all(path.parent().unwrap_or(&cache_dir()))?;
-    let mut encoder = flate2::write::ZlibEncoder::new(fs::File::create(path)?, flate2::Compression::best());
-    serde_json::to_writer(&mut encoder, value)?;
-    encoder.finish().map(drop)
+    serde_json::to_writer(fs::File::create(path)?, value).map_err(io::Error::other)
 }
 
 pub fn evict(cluster: &str, key: &str) {
@@ -176,24 +173,6 @@ fn rpc(cluster: &str, method: &str, params: Value) -> Result<Value, Box<dyn Erro
 /// Whether a validator is answering on `cluster` right now.
 pub fn healthy(cluster: &str) -> bool {
     rpc(cluster, "getHealth", json!([])).is_ok()
-}
-
-/// Signatures of this address's recent failed transactions, newest last. The
-/// suite's own output may name none of them: anchor's client throws a translated
-/// error and mocha prints that, not the signature or the program logs.
-pub fn failed_for_address(cluster: &str, address: &str, limit: usize) -> Vec<String> {
-    let Ok(value) = rpc(cluster, "getSignaturesForAddress", json!([address, {"limit": limit}])) else {
-        return Vec::new();
-    };
-    let mut found: Vec<String> = value["result"]
-        .as_array()
-        .unwrap_or(&Vec::new())
-        .iter()
-        .filter(|entry| !entry["err"].is_null())
-        .filter_map(|entry| entry["signature"].as_str().map(str::to_string))
-        .collect();
-    found.reverse();
-    found
 }
 
 /// Best effort top-up: a validator that refuses airdrops is not our problem, the

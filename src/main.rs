@@ -122,16 +122,7 @@ fn test_command(validator: &mut Option<suite::Validator>) -> io::Result<Option<A
     // Our own validator is still up, so prefer the real transaction over the one
     // reconstructed from log lines: it carries accounts, balances and state diff.
     let (cluster, keys) = match validator {
-        Some(_) => {
-            let mut keys = suite::failed_signatures(&output, "localnet");
-            if keys.is_empty() {
-                // Anchor's client throws a translated error, so the suite output
-                // names neither the signature nor the logs: ask the validator
-                // what failed against the programs this workspace deploys.
-                keys = suite::failed_on_cluster(&root, "localnet");
-            }
-            ("localnet", keys)
-        }
+        Some(_) => ("localnet", suite::failed_signatures(&output, "localnet")),
         None => (suite::CLUSTER, Vec::new()),
     };
     let (cluster, keys) = if keys.is_empty() {
@@ -149,10 +140,6 @@ fn test_command(validator: &mut Option<suite::Validator>) -> io::Result<Option<A
         if cases.is_empty() {
             cases = suite::cases(&output);
             source = "program logs in the suite output";
-        }
-        if cases.is_empty() {
-            cases = suite::anchor_failures(&root, &output);
-            source = "anchor error text (no logs or accounts available)";
         }
         if !cases.is_empty() {
             eprintln!("{} case(s) from {source}", cases.len());
