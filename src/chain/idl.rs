@@ -8,7 +8,7 @@ use curve25519_dalek::edwards::CompressedEdwardsY;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::solana::{self, bs58_decode, bs58_encode};
+use super::solana::{self, bs58_decode, bs58_encode};
 
 thread_local! {
     static CACHE: RefCell<HashMap<String, Option<Rc<Program>>>> = RefCell::new(HashMap::new());
@@ -505,8 +505,8 @@ fn codama_value_bytes(value: &Value, ty: &Type) -> Option<Vec<u8>> {
                 Some("base16") => (0..data.len() / 2)
                     .map(|i| u8::from_str_radix(&data[i * 2..i * 2 + 2], 16).ok())
                     .collect(),
-                Some("base64") => Some(crate::solana::base64_decode(data)),
-                _ => Some(crate::solana::bs58_decode(data)),
+                Some("base64") => Some(super::solana::base64_decode(data)),
+                _ => Some(super::solana::bs58_decode(data)),
             }
         }
         "constantValueNode" => codama_value_bytes(&value["value"], ty),
@@ -716,7 +716,7 @@ pub fn enrich(tx: &mut solana::Tx) {
     let logs = tx.logs[tx.nodes[node].logs.clone()].to_vec();
     let parsed = idl(&cluster, &program);
     let Some(failure) = tx.failure.as_mut() else { return };
-    let crate::diagnose::Code::Custom(code) = failure.code else {
+    let super::diagnose::Code::Custom(code) = failure.code else {
         return;
     };
 
@@ -741,7 +741,7 @@ pub fn enrich(tx: &mut solana::Tx) {
         }
         None => {
             let flavor = parsed.as_ref().map(|parsed| parsed.flavor);
-            let (headline, meaning, hint) = crate::diagnose::infer_custom(code, flavor);
+            let (headline, meaning, hint) = super::diagnose::infer_custom(code, flavor);
             failure.headline = headline;
             failure.meaning = meaning;
             failure.checks.retain(|check| !check.contains("error enum"));
@@ -753,7 +753,7 @@ pub fn enrich(tx: &mut solana::Tx) {
         }
     }
 
-    for check in crate::diagnose::rules(&failure.code, &failure.headline, &logs, cu, limit) {
+    for check in super::diagnose::rules(&failure.code, &failure.headline, &logs, cu, limit) {
         if !failure.checks.contains(&check) {
             failure.checks.push(check);
         }

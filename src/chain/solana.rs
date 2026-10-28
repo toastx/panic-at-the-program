@@ -53,7 +53,7 @@ pub struct Tx {
     pub status: Status,
     pub error: Option<String>,
     pub failed_node: Option<usize>,
-    pub failure: Option<crate::diagnose::Failure>,
+    pub failure: Option<super::diagnose::Failure>,
     pub slot: u64,
     pub nodes: Vec<Node>,
     pub accounts: Vec<Account>,
@@ -570,7 +570,7 @@ pub fn parse(signature: &str, cluster: &str, value: &Value) -> Tx {
 
     let cu = result["meta"]["computeUnitsConsumed"].as_u64().unwrap_or(0) as u32;
     let cu_limit = if cu_limit == 0 { 200_000 } else { cu_limit };
-    let failure = crate::diagnose::failure(&result["meta"]["err"], &nodes, &logs, cu, cu_limit);
+    let failure = super::diagnose::failure(&result["meta"]["err"], &nodes, &logs, cu, cu_limit);
     let failed_node = failed_node.or_else(|| failure.as_ref().and_then(|f| f.node));
 
     Tx {
@@ -1017,7 +1017,7 @@ pub fn transfers(tx: &Tx) -> Vec<Transfer> {
                             account(0),
                             account(2),
                             raw / 10f64.powi(decimals),
-                            crate::ui::short(&account(1)),
+                            crate::app::widgets::short(&account(1)),
                         )
                     }
                     7 => ("Token::MintTo", account(0), account(1), raw, "tokens".to_string()),

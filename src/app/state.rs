@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use ratatui::layout::{Position, Rect};
 use ratatui::widgets::ListState;
 
-use crate::solana::{self, AccountInfo, Entry, Kind, Tx};
+use crate::chain::solana::{self, AccountInfo, Entry, Kind, Tx};
 
 pub const BUILTIN: [&str; 4] = ["mainnet", "devnet", "testnet", "localnet"];
 
@@ -219,7 +219,7 @@ impl App {
         match solana::fetch(&self.cluster, signature) {
             Ok(value) => {
                 let mut tx = solana::parse(signature, &self.cluster, &value);
-                crate::idl::enrich(&mut tx);
+                crate::chain::idl::enrich(&mut tx);
                 self.tx = Some(tx);
                 self.collapsed.clear();
                 self.kind = Kind::Tx;

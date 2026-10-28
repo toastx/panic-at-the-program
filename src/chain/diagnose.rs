@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::solana::{Node, Status};
+use super::solana::{Node, Status};
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Code {
@@ -116,7 +116,7 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
             .accounts
             .iter()
             .filter(|a| !a.signer)
-            .map(|a| crate::ui::short(&a.key))
+            .map(|a| crate::app::widgets::short(&a.key))
             .take(4)
             .collect();
         if !missing.is_empty() {
@@ -424,8 +424,8 @@ fn anchor_hint(code: u32) -> Option<&'static str> {
     })
 }
 
-pub fn infer_custom(code: u32, flavor: Option<crate::idl::Flavor>) -> (String, String, String) {
-    use crate::idl::Flavor;
+pub fn infer_custom(code: u32, flavor: Option<super::idl::Flavor>) -> (String, String, String) {
+    use super::idl::Flavor;
 
     let hex = format!("error {code} (0x{code:x})");
     match flavor {
