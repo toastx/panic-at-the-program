@@ -142,6 +142,13 @@ fn serve(stream: TcpStream, upstream: &str, recorded: &Mutex<Vec<Capture>>) {
     }
 
     let (status, reply) = forward(upstream, &body);
+    // Record before replying: once the caller has its answer it may ask for
+    // `failures()` straight away, and parsing is cheap next to the round trip.
+    if method_line.starts_with("POST")
+        && let Some(capture) = capture(&body, &reply)
+    {
+        recorded.lock().expect("captures").push(capture);
+    }
     let mut stream = stream;
     let head = format!(
         "HTTP/1.1 {status} \r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -152,12 +159,6 @@ fn serve(stream: TcpStream, upstream: &str, recorded: &Mutex<Vec<Capture>>) {
     let _ = stream.flush();
     let _ = stream.shutdown(std::net::Shutdown::Write);
 
-    // Forward first, record after: the suite is waiting on us.
-    if method_line.starts_with("POST")
-        && let Some(capture) = capture(&body, &reply)
-    {
-        recorded.lock().expect("captures").push(capture);
-    }
 }
 
 /// Request line plus `Content-Length`. Other headers are the client's business.
