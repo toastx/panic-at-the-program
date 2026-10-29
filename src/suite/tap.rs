@@ -1,13 +1,5 @@
 //! Records the RPC conversation between a test suite and the validator.
-//!
-//! A suite's own output is a lossy witness: anchor's client turns a preflight
-//! rejection into a thrown string, and the simulation result — execution error,
-//! program logs, compute units — is discarded before it ever reaches stdout. The
-//! suite talks to a validator we started, over an endpoint we choose, so we sit
-//! in the middle and keep what the validator actually said.
-//!
-//! Absent evidence stays absent: every field is an `Option`, and nothing here
-//! invents a log line, a compute figure or a signature.
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +7,6 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-/// One failed RPC call, as the validator reported it.
 #[derive(Debug, Default, Clone)]
 pub struct Capture {
     /// The execution error, when simulation got as far as executing.
@@ -45,9 +36,6 @@ pub struct Tap {
 const BASE: u16 = 18899;
 
 impl Tap {
-    /// Binds an http recorder and a websocket relay, forwarding to the given
-    /// upstreams. Both ports are held from the moment they are found, so nothing
-    /// can take `P+1` between the probe and the bind.
     pub fn start(upstream_http: &str, upstream_ws: &str) -> std::io::Result<Self> {
         let (http, ws, port) = bind_pair()?;
         let captures: Arc<Mutex<Vec<Capture>>> = Arc::default();
@@ -62,8 +50,6 @@ impl Tap {
                 }
                 let Ok(stream) = stream else { continue };
                 let (upstream, recorded) = (upstream.clone(), Arc::clone(&recorded));
-                // One thread per request: a test suite's RPC traffic is sequential
-                // enough that a pool would be ceremony.
                 std::thread::spawn(move || serve(stream, &upstream, &recorded));
             }
         });
@@ -156,6 +142,13 @@ fn serve(stream: TcpStream, upstream: &str, recorded: &Mutex<Vec<Capture>>) {
     }
 
     let (status, reply) = forward(upstream, &body);
+    // Record before replying: once the caller has its answer it may ask for
+    // `failures()` straight away, and parsing is cheap next to the round trip.
+    if method_line.starts_with("POST")
+        && let Some(capture) = capture(&body, &reply)
+    {
+        recorded.lock().expect("captures").push(capture);
+    }
     let mut stream = stream;
     let head = format!(
         "HTTP/1.1 {status} \r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -165,13 +158,6 @@ fn serve(stream: TcpStream, upstream: &str, recorded: &Mutex<Vec<Capture>>) {
     let _ = stream.write_all(&reply);
     let _ = stream.flush();
     let _ = stream.shutdown(std::net::Shutdown::Write);
-
-    // Forward first, record after: the suite is waiting on us.
-    if method_line.starts_with("POST")
-        && let Some(capture) = capture(&body, &reply)
-    {
-        recorded.lock().expect("captures").push(capture);
-    }
 }
 
 /// Request line plus `Content-Length`. Other headers are the client's business.
@@ -197,8 +183,6 @@ fn read_head(reader: &mut impl BufRead) -> Option<(String, usize)> {
 }
 
 fn forward(upstream: &str, body: &[u8]) -> (u16, Vec<u8>) {
-    // A preflight rejection is a JSON-RPC error, sometimes under a 4xx status, and
-    // we want the body either way.
     let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
     match agent
         .post(upstream)
@@ -266,9 +250,6 @@ pub fn capture(request: &[u8], response: &[u8]) -> Option<Capture> {
     (capture.err.is_some() || capture.rpc_error.is_some()).then_some(capture)
 }
 
-/// The validator's http endpoint plus the websocket address derived from it the
-/// way web3.js does, port + 1. Returns host:port for the websocket, ready for
-/// `TcpStream::connect`.
 pub fn upstreams(http_url: &str) -> Option<(String, String)> {
     let authority = http_url.split("//").nth(1)?.trim_end_matches('/');
     let (host, port) = authority.rsplit_once(':')?;
@@ -276,9 +257,6 @@ pub fn upstreams(http_url: &str) -> Option<(String, String)> {
     Some((http_url.to_string(), format!("{host}:{}", port + 1)))
 }
 
-// Captured verbatim from the anchor fixture: `.rpc()` calls sendTransaction,
-// and a preflight rejection comes back as a JSON-RPC *error* with the
-// simulation result under `error.data`.
 #[cfg(test)]
 pub(crate) const SEND_REQUEST: &str = r#"{"method":"sendTransaction","jsonrpc":"2.0","params":["AfSy75UYfC5/xmFP1Hd8gO8Vu0geDdQzuj5WLI4qJYYsQEn0XwZTpgjEqd9ckVHTpNRba0/6GyXownQlfG/0yg8BAAEDLx4ltv4cNg/di2S86vuA4E3qJNuvihourXXY3U52DuPbag3ET21NbKxooWvwVPaDLUhHK/DSbdV2hZhptB5cOBgsSWdaqyP+U9/PEL8k34Jz6LX9gHInnuv62DpMHeaUMP8QR//7LU0+16rrsfg9LI/ADJFUcrUNV4NFjtU1XtgBAgIBABDyI8aJUuHytgAAAAAAAAAA",{"encoding":"base64","preflightCommitment":"processed"}],"id":"61e95c87-2bdd-4ade-8cb7-ad5e7c7cf229"}"#;
 #[cfg(test)]
