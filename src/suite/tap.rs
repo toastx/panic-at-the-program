@@ -158,7 +158,6 @@ fn serve(stream: TcpStream, upstream: &str, recorded: &Mutex<Vec<Capture>>) {
     let _ = stream.write_all(&reply);
     let _ = stream.flush();
     let _ = stream.shutdown(std::net::Shutdown::Write);
-
 }
 
 /// Request line plus `Content-Length`. Other headers are the client's business.
