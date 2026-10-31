@@ -522,6 +522,11 @@ fn cached_idls_stay_out_of_the_history_list() {
     );
 }
 
+/// The note bodies of a diagnosis, in rendered order.
+fn note_texts(failure: &diagnose::Failure) -> Vec<String> {
+    failure.notes.iter().map(|note| note.text.clone()).collect()
+}
+
 #[test]
 fn unknown_codes_are_inferred_from_the_idl_flavor() {
     use idl::Flavor;
@@ -532,7 +537,7 @@ fn unknown_codes_are_inferred_from_the_idl_flavor() {
     assert!(hint.contains("older than the deployed program"));
 
     let (headline, _, hint) = diagnose::infer_custom(2006, Some(Flavor::Anchor));
-    assert!(headline.contains("ConstraintSeeds"));
+    assert_eq!(headline, "ConstraintSeeds");
     assert!(hint.contains("framework"));
 
     let (headline, meaning, hint) = diagnose::infer_custom(3, Some(Flavor::Shank));
@@ -692,7 +697,7 @@ fn idl_errors_replace_the_generic_anchor_headline() {
     let idl = json!({"errors": [{"code": 6001, "name": "VaultLocked", "msg": "the vault is locked"}]});
     let failure = tx.failure.as_mut().unwrap();
     failure.code = diagnose::Code::Custom(6001);
-    failure.headline = "Anchor user error #1 — code 6001 (0x1771)".into();
+    failure.headline = "Anchor user error #1".into();
 
     let (name, message) = idl::error(&idl::parse(&idl), 6001).unwrap();
     assert_eq!(name, "VaultLocked");
@@ -708,21 +713,26 @@ fn instruction_errors_decode_into_a_diagnosis() {
     let failure = diagnose::failure(&anchor, &nodes, &[], 1000, 200_000).unwrap();
     assert_eq!(failure.code, Code::Custom(6001));
     assert_eq!(failure.instruction, Some(5));
-    assert!(failure.headline.contains("Anchor user error #1"));
-    assert!(failure.headline.contains("0x1771"));
-    assert!(failure.checks.iter().any(|c| c.contains("error enum")));
+    assert_eq!(failure.headline, "Anchor user error #1");
+    assert!(
+        failure.label().ends_with(": Anchor user error #1"),
+        "{}",
+        failure.label()
+    );
+    assert!(note_texts(&failure).iter().any(|t| t.contains("error enum")));
 
     let seeds = json!({"InstructionError": [0, {"Custom": 2006}]});
     let failure = diagnose::failure(&seeds, &nodes, &[], 1000, 200_000).unwrap();
     assert!(failure.headline.contains("ConstraintSeeds"));
-    assert!(failure.meaning.contains("derived PDA"));
-    assert!(failure.checks.iter().any(|c| c.contains("re-derive the PDA")));
+    assert_eq!(failure.label(), "error[anchor.2006]: ConstraintSeeds");
+    assert!(failure.meaning.contains("seeds constraint"));
+    assert!(note_texts(&failure).iter().any(|t| t.contains("re-derive the PDA")));
 
     let signature = json!({"InstructionError": [0, "MissingRequiredSignature"]});
     let failure = diagnose::failure(&signature, &nodes, &[], 1000, 200_000).unwrap();
     assert_eq!(failure.code, Code::Named("MissingRequiredSignature".into()));
     assert!(failure.meaning.contains("must sign"));
-    assert!(failure.checks.iter().any(|c| c.contains("no signature from")));
+    assert!(note_texts(&failure).iter().any(|t| t.contains("no signature from")));
 
     assert!(diagnose::failure(&Value::Null, &nodes, &[], 0, 0).is_none());
 }
@@ -929,7 +939,7 @@ fn heuristics_suggest_a_fix_per_failure_class() {
     let nodes = solana::parse("s", "devnet", &fixture()).nodes;
     let fix = |err: Value, logs: Vec<String>, cu, limit| {
         diagnose::failure(&err, &nodes, &logs, cu, limit)
-            .map(|f| f.checks.join(" | "))
+            .map(|f| note_texts(&f).join(" | "))
             .unwrap_or_default()
     };
 
@@ -983,8 +993,8 @@ fn heuristics_suggest_a_fix_per_failure_class() {
 fn token_program_errors_use_the_token_table() {
     let nodes = solana::parse("s", "devnet", &fixture()).nodes;
     let failure = diagnose::failure(&json!({"InstructionError": [0, {"Custom": 1}]}), &nodes, &[], 0, 0).unwrap();
-    assert!(failure.headline.contains("InsufficientFunds"));
-    assert!(failure.headline.contains("Token program"));
+    assert_eq!(failure.headline, "InsufficientFunds");
+    assert_eq!(failure.label(), "error[token.1]: InsufficientFunds");
     assert!(failure.meaning.contains("not hold enough tokens"));
 }
 
@@ -1318,4 +1328,305 @@ fn fetches_and_caches_from_mainnet() {
     assert!(!tx.nodes.is_empty());
     assert!(tx.cu > 0);
     assert!(solana::cached("mainnet").contains(&signature.to_string()));
+}
+
+/// A finding standing in for one validate.rs would produce.
+fn finding(kind: validate::FindingKind, index: usize, role: &str, level: validate::Level) -> validate::Finding {
+    validate::Finding {
+        index,
+        role: role.to_string(),
+        key: format!("Key{index}"),
+        kind,
+        level,
+        message: "something is wrong".to_string(),
+        expected: Some(format!("want{index}")),
+        actual: Some(format!("got{index}")),
+    }
+}
+
+fn seeds_failure() -> diagnose::Failure {
+    let nodes = solana::parse("s", "devnet", &fixture()).nodes;
+    diagnose::failure(&json!({"InstructionError": [0, {"Custom": 2006}]}), &nodes, &[], 0, 0).unwrap()
+}
+
+#[test]
+fn anchor_tsv_is_wellformed() {
+    let rows: Vec<diagnose::Known> = diagnose::anchor_rows().collect();
+    assert_eq!(rows.len(), 77, "anchor-lang 0.32.2 declares 77 error codes");
+
+    for known in &rows {
+        assert!(!known.name.is_empty(), "{} has no name", known.code);
+        assert!(!known.message.is_empty(), "{} has no message", known.code);
+    }
+    let codes: Vec<u32> = rows.iter().map(|known| known.code).collect();
+    let mut sorted = codes.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(codes, sorted, "codes must be ascending with no duplicates");
+
+    // One row per documented range, so a half-finished regeneration is caught.
+    for code in [103, 1002, 1500, 2039, 2506, 3017, 4102, 5000] {
+        assert!(codes.contains(&code), "missing code {code}");
+    }
+    assert_eq!(
+        diagnose::anchor_rows().find(|known| known.code == 2006).unwrap().class,
+        Some(diagnose::Class::Seeds)
+    );
+}
+
+#[test]
+fn every_class_has_tokens_and_help() {
+    for &class in diagnose::Class::ALL {
+        assert!(!class.tokens().is_empty(), "{class:?} has no vocabulary");
+        assert!(!class.help().is_empty(), "{class:?} has no help");
+        assert_eq!(diagnose::Class::from_name(&format!("{class:?}")), Some(class));
+    }
+}
+
+#[test]
+fn class_match_is_deterministic_and_conservative() {
+    use diagnose::Class::*;
+
+    // Real SPL Token / Token-2022 / DeFi error names. None means the matcher
+    // must stay silent: no diagnosis beats a confidently wrong fix.
+    let cases: &[(&str, Option<diagnose::Class>)] = &[
+        ("OwnerMismatch", Some(WrongOwner)),
+        ("InvalidOwner", Some(WrongOwner)),
+        ("InvalidMint", Some(Mint)),
+        ("MintMismatch", Some(Mint)),
+        ("UninitializedState", Some(Uninitialized)),
+        ("AlreadyInUse", Some(Already)),
+        ("NotRentExempt", Some(Rent)),
+        ("AccountFrozen", Some(Paused)),
+        ("Overflow", Some(Overflow)),
+        ("InvalidInstruction", Some(Instruction)),
+        ("InvalidNumberOfProvidedSigners", Some(NotSigner)),
+        ("InsufficientFunds", Some(Insufficient)),
+        ("SlippageToleranceExceeded", Some(Slippage)),
+        ("StaleOracle", Some(Expired)),
+        ("Unauthorized", Some(Unauthorized)),
+        ("SeedsMismatch", Some(Seeds)),
+        ("InvalidPda", Some(Seeds)),
+        ("AccountNotWritable", Some(NotWritable)),
+        // `already` outscores `init`, so the opposite condition is not suggested.
+        ("AlreadyInitialized", Some(Already)),
+        // `balance` is not an Insufficient trigger, or this would false-match.
+        ("NonNativeHasBalance", None),
+        // Mint and Decimals tie, and a tie is ambiguous rather than a coin flip.
+        ("MintDecimalsMismatch", None),
+        ("FixedSupply", None),
+        ("NativeNotSupported", None),
+        ("InvalidState", None),
+        ("Zork", None),
+    ];
+    for (name, want) in cases {
+        assert_eq!(diagnose::classify_name(name), *want, "{name}");
+    }
+}
+
+#[test]
+fn notes_dedupe_by_identity_keeping_the_highest_tier() {
+    use diagnose::{DiagnosticId, Note, Tier};
+
+    let mut notes = vec![
+        Note::new(DiagnosticId::Log("same"), Tier::Help, "help wording".into()),
+        Note::new(DiagnosticId::Log("same"), Tier::Fix, "fix wording".into()),
+        Note::new(DiagnosticId::Log("other"), Tier::Note, "other".into()),
+    ];
+    diagnose::finalize(&mut notes);
+
+    assert_eq!(notes.len(), 2, "one id, one note");
+    let same = notes.iter().find(|n| n.id == DiagnosticId::Log("same")).unwrap();
+    assert_eq!(same.tier, Tier::Fix, "the more specific tier survives");
+
+    // Idempotent, so calling it at every collection boundary is safe.
+    let before: Vec<String> = notes.iter().map(|n| n.id.to_string()).collect();
+    diagnose::finalize(&mut notes);
+    assert_eq!(before, notes.iter().map(|n| n.id.to_string()).collect::<Vec<_>>());
+}
+
+#[test]
+fn two_missing_signers_both_survive_deduplication() {
+    use validate::{FindingKind, Level};
+
+    let mut failure = seeds_failure();
+    let findings = [
+        finding(FindingKind::NotSigner, 1, "payer", Level::Error),
+        finding(FindingKind::NotSigner, 4, "authority", Level::Error),
+    ];
+    diagnose::add_findings(&mut failure, 0, &findings);
+
+    let signers = failure
+        .notes
+        .iter()
+        .filter(|note| note.text.contains("payer") || note.text.contains("authority"))
+        .count();
+    assert_eq!(signers, 2, "two accounts, two notes — identity includes the slot");
+}
+
+#[test]
+fn the_same_code_from_two_programs_is_two_identities() {
+    use diagnose::DiagnosticId;
+
+    let one = DiagnosticId::Program {
+        program: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".into(),
+        code: 6001,
+    };
+    let two = DiagnosticId::Program {
+        program: "Vau1t11111111111111111111111111111111111".into(),
+        code: 6001,
+    };
+    assert_ne!(one, two, "custom codes index each program's own enum");
+    assert_eq!(one.to_string(), "token.6001");
+    assert_eq!(two.to_string(), "custom.6001");
+}
+
+#[test]
+fn findings_order_does_not_change_the_diagnosis() {
+    use validate::{FindingKind, Level};
+
+    let forward = [
+        finding(FindingKind::PdaMismatch, 2, "vault", Level::Error),
+        finding(FindingKind::BelowRent, 3, "payer", Level::Warn),
+        finding(FindingKind::NotSigner, 1, "authority", Level::Error),
+    ];
+    let mut reversed = forward.clone();
+    reversed.reverse();
+
+    let render = |findings: &[validate::Finding]| {
+        let mut failure = seeds_failure();
+        diagnose::add_findings(&mut failure, 0, findings);
+        failure
+            .notes
+            .iter()
+            .map(|note| format!("{:?} {} {}", note.tier, note.id, note.text))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(render(&forward), render(&reversed));
+}
+
+#[test]
+fn evidence_promotes_inferred_advice_to_a_fix() {
+    use validate::{FindingKind, Level};
+
+    // A seeds failure corroborated by the derived PDA differing.
+    let mut failure = seeds_failure();
+    failure.notes.push(diagnose::Note::maybe(
+        diagnose::DiagnosticId::Log("class.inferred"),
+        diagnose::Tier::Help,
+        "inferred advice".into(),
+    ));
+    diagnose::add_findings(
+        &mut failure,
+        0,
+        &[finding(FindingKind::PdaMismatch, 2, "vault", Level::Error)],
+    );
+
+    let inferred = failure
+        .notes
+        .iter()
+        .find(|note| note.id == diagnose::DiagnosticId::Log("class.inferred"))
+        .unwrap();
+    assert_eq!(
+        inferred.confidence,
+        diagnose::Confidence::Certain,
+        "on-chain evidence turns the guess into a fact"
+    );
+    let fix = failure
+        .notes
+        .iter()
+        .find(|note| matches!(note.id, diagnose::DiagnosticId::Finding { .. }))
+        .unwrap();
+    assert_eq!(fix.tier, diagnose::Tier::Fix);
+    assert_eq!(fix.expected.as_deref(), Some("want2"));
+
+    // Uncorroborated, the same advice stays hedged.
+    let mut alone = seeds_failure();
+    alone.notes.push(diagnose::Note::maybe(
+        diagnose::DiagnosticId::Log("class.inferred"),
+        diagnose::Tier::Help,
+        "inferred advice".into(),
+    ));
+    diagnose::add_findings(
+        &mut alone,
+        0,
+        &[finding(FindingKind::BelowRent, 3, "payer", Level::Warn)],
+    );
+    let still = alone
+        .notes
+        .iter()
+        .find(|note| note.id == diagnose::DiagnosticId::Log("class.inferred"))
+        .unwrap();
+    assert_eq!(still.confidence, diagnose::Confidence::Likely);
+}
+
+#[test]
+fn the_diagnosis_renders_in_a_fixed_order() {
+    let nodes = solana::parse("s", "devnet", &fixture()).nodes;
+    let logs = vec![
+        "Program log: panicked at 'attempt to subtract with overflow'".to_string(),
+        "Program log: Transfer: insufficient lamports 890880, need 2039280".to_string(),
+    ];
+    let failure = diagnose::failure(
+        &json!({"InstructionError": [0, "ProgramFailedToComplete"]}),
+        &nodes,
+        &logs,
+        200_000,
+        200_000,
+    )
+    .unwrap();
+
+    let order: Vec<String> = failure
+        .notes
+        .iter()
+        .map(|note| format!("{:?}/{:?}/{}", note.tier, note.confidence, note.id))
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            "Help/Certain/program.panic".to_string(),
+            "Help/Certain/rent.shortfall".to_string(),
+        ],
+        "tier then id, independent of which branch pushed first"
+    );
+}
+
+#[test]
+fn a_narrow_terminal_still_shows_the_whole_diagnosis() {
+    let mut app = App::new("devnet".into());
+    app.tx = Some(solana::parse("4vK9mP", "devnet", &constraint_fixture()));
+    app.kind = solana::Kind::Tx;
+    app.goto(Screen::Overview);
+
+    // Width 60 forces notes to wrap; the panel is sized from the wrapped row
+    // count, so nothing is cut off.
+    let narrow = render(&mut app, 60, 40);
+    assert!(narrow.contains("error[anchor.2006]"), "{narrow}");
+    assert!(narrow.contains("re-derive"), "help survives wrapping:\n{narrow}");
+
+    let wide = render(&mut app, 160, 40);
+    assert!(wide.contains("7xKX9mPaRvQw1bNcTzWd4rYfG6hJ8uL2sE5vA3dC9kFq"));
+}
+
+#[test]
+fn inferred_advice_renders_as_a_guess_not_an_instruction() {
+    let mut app = App::new("devnet".into());
+    app.tx = Some(solana::parse("4vK9mP", "devnet", &constraint_fixture()));
+    app.kind = solana::Kind::Tx;
+    let failure = app.tx.as_mut().unwrap().failure.as_mut().unwrap();
+    failure.notes.push(diagnose::Note::maybe(
+        diagnose::DiagnosticId::Log("class.inferred"),
+        diagnose::Tier::Help,
+        "inferred from the name `InvalidOwner` — check which program owns the account you passed".into(),
+    ));
+    diagnose::finalize(&mut failure.notes);
+    app.goto(Screen::Overview);
+
+    let screen = render(&mut app, 140, 34);
+    assert!(
+        screen.contains("maybe — inferred from the name"),
+        "a guess has to read as a guess:\n{screen}"
+    );
+    // The certain advice on the same diagnosis carries no hedge.
+    assert!(screen.contains("= help: re-derive the PDA"), "{screen}");
 }

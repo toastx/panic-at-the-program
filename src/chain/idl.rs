@@ -706,6 +706,62 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Names a custom error code from the IDL or patp.toml, falling back to what
+/// the IDL flavor implies, and infers advice from the name when the program
+/// named the error but not the fix.
+fn name_custom_code(failure: &mut super::diagnose::Failure, program: &str, code: u32, parsed: Option<&Program>) {
+    use super::diagnose::{DiagnosticId, Note, Tier};
+
+    let named = crate::workspace::error_label(program, code)
+        .map(|(name, message)| (name, message, true))
+        .or_else(|| {
+            let (name, message) = error(parsed?, code)?;
+            Some((name, message, false))
+        });
+
+    failure
+        .notes
+        .retain(|note| note.id != DiagnosticId::Log("anchor.user_range"));
+
+    let Some((name, message, from_config)) = named else {
+        let (headline, meaning, hint) = super::diagnose::infer_custom(code, parsed.map(|p| p.flavor));
+        failure.headline = headline;
+        failure.meaning = meaning;
+        failure
+            .notes
+            .push(Note::new(DiagnosticId::Log("flavor.inferred"), Tier::Note, hint));
+        failure.notes.push(Note::new(
+            DiagnosticId::Log("name.unnamed"),
+            Tier::Help,
+            format!("name it in patp.toml: [errors.{program}] {code} = \"Name: what it means\""),
+        ));
+        crate::workspace::record_error_stub(program, code);
+        return;
+    };
+
+    failure.headline = name.clone();
+    if !message.is_empty() {
+        failure.meaning = message;
+    }
+    if from_config {
+        failure.notes.push(Note::new(
+            DiagnosticId::Log("name.patp_toml"),
+            Tier::Note,
+            "named by your patp.toml error table".to_string(),
+        ));
+    }
+    if failure.class.is_none()
+        && let Some(class) = super::diagnose::classify_name(&name)
+    {
+        failure.class = Some(class);
+        failure.notes.push(Note::maybe(
+            DiagnosticId::Log("class.inferred"),
+            Tier::Help,
+            format!("inferred from the name `{name}` — {}", class.help()),
+        ));
+    }
+}
+
 pub fn enrich(tx: &mut solana::Tx) {
     let cluster = tx.cluster.clone();
     let (cu, limit) = (tx.cu, tx.cu_limit);
@@ -715,47 +771,21 @@ pub fn enrich(tx: &mut solana::Tx) {
     let program = tx.nodes[node].program.clone();
     let logs = tx.logs[tx.nodes[node].logs.clone()].to_vec();
     let parsed = idl(&cluster, &program);
-    let Some(failure) = tx.failure.as_mut() else { return };
-    let super::diagnose::Code::Custom(code) = failure.code else {
-        return;
+    // Resolved before the failure is borrowed mutably, and only when the account
+    // list is known to be whole: partial lists produce bogus findings.
+    let findings = if tx.accounts_complete {
+        super::validate::check(&cluster, tx, node)
+    } else {
+        Vec::new()
     };
 
-    let named = crate::workspace::error_label(&program, code)
-        .map(|(name, message)| (name, message, "patp.toml".to_string()))
-        .or_else(|| {
-            let parsed = parsed.as_ref()?;
-            let (name, message) = error(parsed, code)?;
-            Some((name, message, parsed.flavor.label().to_string()))
-        });
-
-    match named {
-        Some((name, message, source)) => {
-            failure.headline = format!("{name} — error {code} (0x{code:x})");
-            if !message.is_empty() {
-                failure.meaning = message;
-            }
-            failure.checks.retain(|check| !check.contains("error enum"));
-            if source == "patp.toml" {
-                failure.checks.push("named by your patp.toml error table".to_string());
-            }
-        }
-        None => {
-            let flavor = parsed.as_ref().map(|parsed| parsed.flavor);
-            let (headline, meaning, hint) = super::diagnose::infer_custom(code, flavor);
-            failure.headline = headline;
-            failure.meaning = meaning;
-            failure.checks.retain(|check| !check.contains("error enum"));
-            failure.checks.push(hint);
-            failure.checks.push(format!(
-                "name it in patp.toml: [errors.{program}] {code} = \"Name: what it means\""
-            ));
-            crate::workspace::record_error_stub(&program, code);
-        }
+    let Some(failure) = tx.failure.as_mut() else { return };
+    if let super::diagnose::Code::Custom(code) = failure.code {
+        name_custom_code(failure, &program, code, parsed.as_deref());
     }
 
-    for check in super::diagnose::rules(&failure.code, &failure.headline, &logs, cu, limit) {
-        if !failure.checks.contains(&check) {
-            failure.checks.push(check);
-        }
-    }
+    let logged = super::diagnose::log_notes(&failure.code, &logs, cu, limit);
+    failure.notes.extend(logged);
+    super::diagnose::add_findings(failure, node, &findings);
+    tx.findings = findings;
 }

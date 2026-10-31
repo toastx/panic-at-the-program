@@ -3,6 +3,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding
 
 use super::state::{App, Click, Mode, Screen};
 use super::widgets::*;
+use crate::chain::diagnose::{Confidence, Failure, Tier};
 use crate::chain::solana::{Status, Tx};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -153,20 +154,20 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
         tx.balances.iter().filter(|b| b.before != b.after).collect();
     movers.sort_by(|a, b| (b.after - b.before).abs().total_cmp(&(a.after - a.before).abs()));
     movers.truncate(3);
-    let path_height = if path.is_empty() {
-        0
-    } else {
-        tx.failure.as_ref().map_or(0, |f| {
-            f.checks.len() as u16
-                + [&f.account, &f.expected, &f.actual, &f.source]
-                    .iter()
-                    .filter(|value| value.is_some())
-                    .count() as u16
-        }) + 5
-            + u16::from(payer_line(tx).is_some())
-            + u16::from(!tx.accounts_complete)
-    };
+    let diag = tx
+        .failure
+        .as_ref()
+        .filter(|_| !path.is_empty())
+        .map(|failure| diagnostic_panel(tx, failure, area.width.saturating_sub(4)));
     let movers_height = if movers.is_empty() { 0 } else { movers.len() as u16 + 3 };
+    // ponytail: a diagnosis taller than the screen is clipped here rather than
+    // scrolled, capped so the panels below it still get their rows. The
+    // instruction screen shows the same diagnostic with more room. Add a scroll
+    // offset if real transactions start overflowing.
+    let path_height = diag
+        .as_ref()
+        .map_or(0, |(_, rows)| rows + 2)
+        .min(area.height.saturating_sub(8 + movers_height));
 
     let rows = Layout::vertical([
         Constraint::Length(4),
@@ -187,12 +188,7 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
     };
     let detail = match (&tx.failure, &tx.error, tx.failed_node.and_then(|i| tx.nodes.get(i))) {
         (Some(failure), _, Some(node)) => {
-            format!(
-                "Instruction {} · {} · {}",
-                node.path,
-                node_label(node),
-                failure.headline
-            )
+            format!("Instruction {} · {} · {}", node.path, node_label(node), failure.label())
         }
         (_, Some(error), Some(node)) => format!("Instruction {} · {} · {}", node.path, node_label(node), error),
         (_, Some(error), None) => error.clone(),
@@ -242,76 +238,13 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
         );
     }
 
-    if path_height > 0 {
+    if let Some((paragraph, _)) = diag {
         let block = panel("DIAGNOSIS", false)
             .border_style(Style::new().fg(BAD))
             .padding(Padding::horizontal(1));
         let inner = block.inner(rows[2]);
         f.render_widget(block, rows[2]);
-
-        let mut lines = Vec::new();
-        if let Some(failure) = &tx.failure {
-            lines.push(Line::from(vec![
-                Span::styled("✕  ", Style::new().fg(BAD).bold()),
-                Span::styled(failure.headline.clone(), Style::new().fg(BAD).bold()),
-            ]));
-            if !failure.meaning.is_empty() {
-                lines.push(Line::styled(format!("   {}", failure.meaning), muted()));
-            }
-        }
-        if let Some(&failed) = path.last() {
-            let node = &tx.nodes[failed];
-            lines.push(Line::from(vec![
-                Span::styled("   instruction ", muted()),
-                Span::styled(node.path.clone(), Style::new().fg(Color::White).bold()),
-                Span::styled("  ", muted()),
-                Span::styled(
-                    call_path(tx, failed).join("  →  "),
-                    Style::new().fg(Color::Rgb(233, 164, 170)),
-                ),
-            ]));
-        }
-        if let Some((key, balance)) = payer_line(tx) {
-            lines.push(Line::from(vec![
-                Span::styled(format!("   {:<9}", "payer"), muted()),
-                Span::styled(key, Style::new().fg(Color::Rgb(176, 180, 210))),
-                Span::styled(format!("  {balance}"), muted()),
-            ]));
-        }
-        if !tx.accounts_complete {
-            lines.push(Line::styled(
-                "   account list incomplete — address table lookups unresolved, account checks withheld".to_string(),
-                Style::new().fg(Color::Rgb(233, 196, 106)),
-            ));
-        }
-        if let Some(failure) = &tx.failure {
-            for (label, value) in [
-                ("account", failure.account.as_ref()),
-                ("expected", failure.expected.as_ref()),
-                ("actual", failure.actual.as_ref()),
-                ("source", failure.source.as_ref()),
-            ] {
-                let Some(value) = value else { continue };
-                lines.push(Line::from(vec![
-                    Span::styled(format!("   {label:<9}"), muted()),
-                    Span::styled(
-                        value.clone(),
-                        match label {
-                            "expected" => Style::new().fg(OK),
-                            "actual" => Style::new().fg(BAD),
-                            _ => Style::new().fg(Color::Rgb(176, 180, 210)),
-                        },
-                    ),
-                ]));
-            }
-            lines.extend(failure.checks.iter().map(|check| {
-                Line::from(vec![
-                    Span::styled("   → ", Style::new().fg(ACCENT)),
-                    Span::styled(check.clone(), Style::new().fg(Color::Rgb(176, 180, 210))),
-                ])
-            }));
-        }
-        f.render_widget(Paragraph::new(lines), inner);
+        f.render_widget(paragraph, inner);
     }
 
     if movers_height > 0 {
@@ -420,7 +353,7 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
                     .failure
                     .as_ref()
                     .filter(|failure| failure.node == Some(i))
-                    .map(|failure| failure.headline.clone())
+                    .map(Failure::label)
                     .or_else(|| node.error.clone());
                 if let Some(message) = message {
                     spans.push(Span::styled(format!("  ⚠ {message}"), Style::new().fg(BAD).bold()));
@@ -483,14 +416,16 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let error_height = if failed {
-        3 + tx
-            .failure
-            .as_ref()
-            .filter(|f| f.node == Some(index))
-            .map_or(0, |f| f.checks.len() as u16)
-    } else {
-        0
+    let diag = tx
+        .failure
+        .as_ref()
+        .filter(|failure| failed && failure.node == Some(index))
+        .map(|failure| diagnostic_panel(tx, failure, inner.width));
+    let error_height = match &diag {
+        Some((_, rows)) => rows + 1,
+        // No diagnosis for this node, but the raw error still gets a line.
+        None if failed => 2,
+        None => 0,
     };
     let rows = Layout::vertical([
         Constraint::Length(2),
@@ -549,7 +484,16 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
     ];
     let decoded = crate::chain::idl::idl(&tx.cluster, &node.program)
         .and_then(|idl| crate::chain::idl::instruction(&idl, &crate::chain::solana::bs58_decode(&node.data)));
-    let findings = crate::chain::validate::check(&tx.cluster, tx, index);
+    // Cached for the failing instruction, which is the one the diagnosis is
+    // about; any other instruction the user drills into is resolved on demand.
+    let computed;
+    let findings: &[crate::chain::validate::Finding] =
+        if Some(index) == tx.failure.as_ref().and_then(|failure| failure.node) {
+            &tx.findings
+        } else {
+            computed = crate::chain::validate::check(&tx.cluster, tx, index);
+            &computed
+        };
     if let Some(decoded) = &decoded {
         facts.push(Line::from(vec![
             Span::styled("Data        ", muted()),
@@ -586,28 +530,19 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
     }
     f.render_widget(Paragraph::new(facts), rows[1]);
 
-    if failed {
-        let diagnosed = tx.failure.as_ref().filter(|failure| failure.node == Some(index));
-        let headline = match diagnosed {
-            Some(failure) => failure.headline.clone(),
-            None => node.error.clone().or_else(|| tx.error.clone()).unwrap_or_default(),
-        };
-        let mut lines = vec![Line::from(vec![
-            Span::styled("⚠  ", Style::new().fg(BAD).bold()),
-            Span::styled(headline, Style::new().fg(BAD).bold()),
-        ])];
-        if let Some(failure) = diagnosed {
-            if !failure.meaning.is_empty() {
-                lines.push(Line::styled(format!("   {}", failure.meaning), muted()));
-            }
-            lines.extend(failure.checks.iter().map(|check| {
-                Line::from(vec![
-                    Span::styled("   → ", Style::new().fg(ACCENT)),
-                    Span::styled(check.clone(), Style::new().fg(Color::Rgb(176, 180, 210))),
-                ])
-            }));
+    match diag {
+        Some((paragraph, _)) => f.render_widget(paragraph, rows[2]),
+        None if failed => {
+            let error = node.error.clone().or_else(|| tx.error.clone()).unwrap_or_default();
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("⚠  ", Style::new().fg(BAD).bold()),
+                    Span::styled(error, Style::new().fg(BAD).bold()),
+                ])),
+                rows[2],
+            );
         }
-        f.render_widget(Paragraph::new(lines), rows[2]);
+        None => {}
     }
 
     if !findings.is_empty() {
@@ -1057,7 +992,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         let diagnosed = tx.failure.as_ref().filter(|failure| failure.node == Some(index));
         lines.push(Line::styled("ERROR", Style::new().fg(BAD)));
         lines.push(Line::styled(
-            diagnosed.map_or_else(|| error.clone(), |failure| failure.headline.clone()),
+            diagnosed.map_or_else(|| error.clone(), Failure::label),
             Style::new().fg(BAD).bold(),
         ));
         if let Some(failure) = diagnosed {
@@ -1465,4 +1400,129 @@ fn help(f: &mut Frame, area: Rect) {
         ),
         inner,
     );
+}
+
+/// The `|` lines: everything that locates the failure, before the advice.
+fn diagnostic_span(tx: &Tx, failure: &Failure) -> Vec<Line<'static>> {
+    let pointer = |label: &str, value: String, color: Color| {
+        Line::from(vec![
+            Span::styled(format!("   |    {label}"), muted()),
+            Span::styled(value, Style::new().fg(color)),
+        ])
+    };
+    let plain = Color::Rgb(176, 180, 210);
+    let mut lines = Vec::new();
+
+    if let Some((key, balance)) = payer_line(tx) {
+        lines.push(pointer("payer     ", format!("{key}  {balance}"), plain));
+    }
+    if let Some(source) = &failure.source {
+        lines.push(pointer("thrown in ", source.clone(), plain));
+    }
+    lines.extend(
+        failure
+            .notes
+            .iter()
+            .filter(|note| note.tier == Tier::Span)
+            .map(|note| pointer("", note.text.clone(), plain)),
+    );
+    if !tx.accounts_complete {
+        lines.push(pointer(
+            "",
+            "account list incomplete — address table lookups unresolved, account checks withheld".into(),
+            Color::Rgb(233, 196, 106),
+        ));
+    }
+    lines
+}
+
+/// One note as its `= note:` / `= help:` / `= fix:` line, plus a line each for
+/// any expected and actual value.
+///
+/// Values go on their own lines: a 44-character pubkey appended to a note would
+/// wrap mid-key, and a wrapped key cannot be copied in one piece.
+fn diagnostic_note(note: &crate::chain::diagnose::Note) -> Vec<Line<'static>> {
+    let (keyword, color) = match note.tier {
+        Tier::Note => ("   = note: ", MUTED),
+        Tier::Help => ("   = help: ", ACCENT),
+        Tier::Fix => ("   = fix:  ", OK),
+        Tier::Span => unreachable!("span notes are rendered by diagnostic_span"),
+    };
+    let inferred = note.confidence == Confidence::Likely;
+    let mut spans = vec![Span::styled(keyword, Style::new().fg(color))];
+    if inferred {
+        spans.push(Span::styled("maybe — ", Style::new().fg(MUTED).italic()));
+    }
+    spans.push(Span::styled(
+        note.text.clone(),
+        if inferred {
+            muted()
+        } else {
+            Style::new().fg(Color::Rgb(176, 180, 210))
+        },
+    ));
+
+    let mut lines = vec![Line::from(spans)];
+    for (label, value, color) in [
+        ("expected", note.expected.as_ref(), OK),
+        ("actual  ", note.actual.as_ref(), BAD),
+    ] {
+        let Some(value) = value else { continue };
+        lines.push(Line::from(vec![
+            Span::styled(format!("           {label} "), muted()),
+            Span::styled(value.clone(), Style::new().fg(color)),
+        ]));
+    }
+    lines
+}
+
+/// Renders a failure the way rustc renders an error: a labelled headline, a
+/// span pointing at the failing instruction, then tiered note/help/fix lines.
+fn diagnostic(tx: &Tx, failure: &Failure) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(vec![
+        Span::styled("✕ ", Style::new().fg(BAD).bold()),
+        Span::styled(failure.label(), Style::new().fg(BAD).bold()),
+    ])];
+
+    if let Some(index) = failure.node.or(tx.failed_node) {
+        lines.push(Line::from(vec![
+            Span::styled("  --> ", muted()),
+            Span::styled(
+                format!("instruction {}", tx.nodes[index].path),
+                Style::new().fg(Color::White).bold(),
+            ),
+            Span::styled("  ·  ", muted()),
+            Span::styled(
+                call_path(tx, index).join("  →  "),
+                Style::new().fg(Color::Rgb(233, 164, 170)),
+            ),
+        ]));
+    }
+    lines.extend(diagnostic_span(tx, failure));
+
+    if !failure.meaning.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("   = note: ", Style::new().fg(MUTED)),
+            Span::styled(failure.meaning.clone(), muted()),
+        ]));
+    }
+    lines.extend(
+        failure
+            .notes
+            .iter()
+            .filter(|note| note.tier != Tier::Span)
+            .flat_map(diagnostic_note),
+    );
+    lines
+}
+
+/// A diagnostic paragraph and the rows it will actually occupy once wrapped at
+/// `inner_width`.
+///
+/// Counting logical lines is not enough: at a narrow width one note can take
+/// three rows, and the panel would clip what it cannot show.
+fn diagnostic_panel(tx: &Tx, failure: &Failure, inner_width: u16) -> (Paragraph<'static>, u16) {
+    let paragraph = Paragraph::new(diagnostic(tx, failure)).wrap(Wrap { trim: false });
+    let rows = paragraph.line_count(inner_width) as u16;
+    (paragraph, rows)
 }
