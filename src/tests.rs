@@ -1660,3 +1660,66 @@ fn inferred_advice_renders_as_a_guess_not_an_instruction() {
     // The certain advice on the same diagnosis carries no hedge.
     assert!(screen.contains("= help: re-derive the PDA"), "{screen}");
 }
+
+#[test]
+fn uncased_error_names_terminate() {
+    // word_end used to return `start` for alphanumerics that are neither upper
+    // nor lower case, so tokenize looped forever pushing empty strings. Reachable
+    // from any IDL or patp.toml error name.
+    for name in ["中", "错误", "エラー", "שגיאה", "Ошибка", "Ошибка2"] {
+        assert_eq!(diagnose::classify_name(name), None, "{name}");
+    }
+    // Mixed scripts still tokenize the part we understand.
+    assert_eq!(diagnose::classify_name("中Owner"), Some(diagnose::Class::WrongOwner));
+}
+
+#[test]
+fn cpi_pda_authorities_are_not_reported_as_missing_signers() {
+    use crate::chain::solana::{Account, Node, Status};
+
+    let spec = |name: &str| idl::AccountSpec {
+        name: name.to_string(),
+        signer: true,
+        writable: false,
+        address: None,
+        seeds: None,
+    };
+    // A PDA is off-curve, so it can never be a transaction signer, but a
+    // program can sign for it with invoke_signed. Both keys are verified by
+    // idl::off_curve.
+    let pda = "3sPq1aBxGv2kkR7ZLczdKJ2w7xkGk4trQJcM3pQWvNnT";
+    let keypair = "7xKX9mPaRvQw1bNcTzWd4rYfG6hJ8uL2sE5vA3dC9kFq";
+    let node = |depth: usize, key: &str| Node {
+        program: "Prog1111111111111111111111111111111111111".to_string(),
+        path: "1.0".to_string(),
+        label: String::new(),
+        depth,
+        status: Status::Failed,
+        error: None,
+        cu: 0,
+        self_cu: 0,
+        accounts: vec![Account {
+            key: key.to_string(),
+            signer: false,
+            writable: false,
+        }],
+        data: String::new(),
+        name: None,
+        children: 0,
+        logs: 0..0,
+    };
+
+    let specs = [spec("authority")];
+    assert!(
+        validate::declared_findings(&specs, &node(1, pda)).is_empty(),
+        "a CPI can sign for its own PDA"
+    );
+    assert!(
+        !validate::declared_findings(&specs, &node(0, pda)).is_empty(),
+        "at depth 0 there is no caller to sign for it"
+    );
+    assert!(
+        !validate::declared_findings(&specs, &node(1, keypair)).is_empty(),
+        "an on-curve key is a real keypair that had to sign"
+    );
+}

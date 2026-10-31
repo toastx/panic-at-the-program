@@ -98,7 +98,7 @@ fn sha256(parts: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn off_curve(bytes: &[u8; 32]) -> bool {
+pub fn off_curve(bytes: &[u8; 32]) -> bool {
     CompressedEdwardsY(*bytes).decompress().is_none()
 }
 

@@ -115,6 +115,18 @@ pub fn check(cluster: &str, tx: &Tx, index: usize) -> Vec<Finding> {
     findings
 }
 
+/// Whether a declared signer that did not sign the transaction is still
+/// explainable rather than a fault.
+///
+/// Inside a CPI a program can sign for its own PDAs with `invoke_signed`, and
+/// that privilege never reaches the transaction's signer list, which is all
+/// `instruction_accounts` has to copy from. An on-curve key has no such excuse:
+/// it is a real keypair that had to sign. Neither does anything at depth 0,
+/// where there is no caller to sign on its behalf.
+fn may_sign_via_cpi(node: &Node, key: &str) -> bool {
+    node.depth > 0 && <[u8; 32]>::try_from(bs58_decode(key).as_slice()).is_ok_and(|bytes| idl::off_curve(&bytes))
+}
+
 pub fn declared_findings(specs: &[idl::AccountSpec], node: &Node) -> Vec<Finding> {
     if specs.len() != node.accounts.len() {
         return Vec::new();
@@ -133,7 +145,7 @@ pub fn declared_findings(specs: &[idl::AccountSpec], node: &Node) -> Vec<Finding
             actual: actual_value,
         };
 
-        if spec.signer && !actual.signer {
+        if spec.signer && !actual.signer && !may_sign_via_cpi(node, &actual.key) {
             findings.push(finding(
                 FindingKind::NotSigner,
                 Level::Error,
