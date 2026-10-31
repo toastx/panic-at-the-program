@@ -1540,6 +1540,36 @@ fn evidence_promotes_inferred_advice_to_a_fix() {
     assert_eq!(fix.tier, diagnose::Tier::Fix);
     assert_eq!(fix.expected.as_deref(), Some("want2"));
 
+    // A guess from some other source is not corroborated by this finding, so
+    // one piece of evidence must not stamp "certain" on unrelated advice.
+    let mut mixed = seeds_failure();
+    mixed.notes.push(diagnose::Note::maybe(
+        diagnose::DiagnosticId::Log("class.inferred"),
+        diagnose::Tier::Help,
+        "advice the finding confirms".into(),
+    ));
+    mixed.notes.push(diagnose::Note::maybe(
+        diagnose::DiagnosticId::Log("some.other.guess"),
+        diagnose::Tier::Help,
+        "advice the finding says nothing about".into(),
+    ));
+    diagnose::add_findings(
+        &mut mixed,
+        0,
+        &[finding(FindingKind::PdaMismatch, 2, "vault", Level::Error)],
+    );
+
+    let by_id = |id| {
+        mixed
+            .notes
+            .iter()
+            .find(|note| note.id == diagnose::DiagnosticId::Log(id))
+            .unwrap()
+            .confidence
+    };
+    assert_eq!(by_id("class.inferred"), diagnose::Confidence::Certain);
+    assert_eq!(by_id("some.other.guess"), diagnose::Confidence::Likely);
+
     // Uncorroborated, the same advice stays hedged.
     let mut alone = seeds_failure();
     alone.notes.push(diagnose::Note::maybe(

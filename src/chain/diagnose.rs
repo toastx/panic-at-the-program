@@ -59,7 +59,7 @@ pub enum Tier {
 /// How much the user should trust a note, mirroring rustc's `Applicability`:
 /// `Certain` came from a table or from on-chain evidence, `Likely` from
 /// inferring a fix out of an error's name.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Confidence {
     Certain,
     Likely,
@@ -724,7 +724,11 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
     // The program's own words beat our table when it logged them.
     let logs_slice = node.and_then(|i| logs.get(nodes[i].logs.clone())).unwrap_or(logs);
     let anchor = anchor_log(logs_slice);
-    if let (Some(name), Some(_)) = (&anchor.name, anchor.number) {
+    // A name is only trustworthy alongside a number: that pair means a real
+    // AnchorError line rather than a stray log.
+    if anchor.number.is_some()
+        && let Some(name) = &anchor.name
+    {
         headline = name.clone();
     }
     if let Some(message) = &anchor.message
@@ -992,9 +996,10 @@ pub fn add_findings(failure: &mut Failure, instruction: usize, findings: &[Findi
     }
 
     if corroborated {
-        // The evidence names the account, so the inferred advice is now a fact.
+        // The evidence names the account, so the class's inferred advice is now
+        // a fact. Other guesses are not corroborated by it.
         for note in &mut failure.notes {
-            if note.confidence == Confidence::Likely {
+            if note.confidence == Confidence::Likely && note.id == DiagnosticId::Log("class.inferred") {
                 note.confidence = Confidence::Certain;
             }
         }
