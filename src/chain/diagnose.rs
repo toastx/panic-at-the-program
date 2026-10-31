@@ -241,7 +241,10 @@ fn word_end(chars: &[char], start: usize) -> usize {
         return run(chars, start, |c| c.is_ascii_digit());
     }
     if !chars[start].is_uppercase() {
-        return run(chars, start, char::is_lowercase);
+        // From start + 1: this character is already known to belong to the
+        // word, and starting the run past it guarantees the scan advances even
+        // for uncased alphanumerics like 中, which are neither upper nor lower.
+        return run(chars, start + 1, char::is_lowercase);
     }
     if chars.get(start + 1).is_some_and(|c| c.is_lowercase()) {
         return run(chars, start + 1, char::is_lowercase);
