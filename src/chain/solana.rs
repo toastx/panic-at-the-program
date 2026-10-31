@@ -54,6 +54,7 @@ pub struct Tx {
     pub error: Option<String>,
     pub failed_node: Option<usize>,
     pub failure: Option<super::diagnose::Failure>,
+    pub findings: Vec<super::validate::Finding>,
     pub slot: u64,
     pub nodes: Vec<Node>,
     pub accounts: Vec<Account>,
@@ -584,6 +585,8 @@ pub fn parse(signature: &str, cluster: &str, value: &Value) -> Tx {
         error,
         failed_node,
         failure,
+        // Filled by idl::enrich, which can reach the network for account state.
+        findings: Vec::new(),
         balances: balance_changes(result, &keys),
         payer: match (
             keys.first(),

@@ -16,10 +16,25 @@ pub enum Level {
     Warn,
 }
 
+/// What a finding found. Typed rather than keyed off the message, so the
+/// diagnosis can correlate findings with error classes without matching prose.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
+pub enum FindingKind {
+    NotSigner,
+    NotWritable,
+    AddressMismatch,
+    UnresolvedSeed,
+    PdaMismatch,
+    NotAta,
+    BelowRent,
+}
+
+#[derive(Clone, Debug)]
 pub struct Finding {
     pub index: usize,
     pub role: String,
     pub key: String,
+    pub kind: FindingKind,
     pub level: Level,
     pub message: String,
     pub expected: Option<String>,
@@ -107,10 +122,11 @@ pub fn declared_findings(specs: &[idl::AccountSpec], node: &Node) -> Vec<Finding
     let mut findings = Vec::new();
     for (i, spec) in specs.iter().enumerate() {
         let actual = &node.accounts[i];
-        let finding = |level, message: String, expected, actual_value| Finding {
+        let finding = |kind, level, message: String, expected, actual_value| Finding {
             index: i,
             role: spec.name.clone(),
             key: actual.key.clone(),
+            kind,
             level,
             message,
             expected,
@@ -119,6 +135,7 @@ pub fn declared_findings(specs: &[idl::AccountSpec], node: &Node) -> Vec<Finding
 
         if spec.signer && !actual.signer {
             findings.push(finding(
+                FindingKind::NotSigner,
                 Level::Error,
                 "declared as signer but did not sign".into(),
                 None,
@@ -127,6 +144,7 @@ pub fn declared_findings(specs: &[idl::AccountSpec], node: &Node) -> Vec<Finding
         }
         if spec.writable && !actual.writable {
             findings.push(finding(
+                FindingKind::NotWritable,
                 Level::Error,
                 "declared writable but passed read-only".into(),
                 None,
@@ -137,6 +155,7 @@ pub fn declared_findings(specs: &[idl::AccountSpec], node: &Node) -> Vec<Finding
             && fixed != actual.key
         {
             findings.push(finding(
+                FindingKind::AddressMismatch,
                 Level::Error,
                 "address does not match the one the program requires".into(),
                 Some(fixed.to_string()),
@@ -145,6 +164,7 @@ pub fn declared_findings(specs: &[idl::AccountSpec], node: &Node) -> Vec<Finding
         }
         if let Some(unresolved) = unresolved_seed(spec) {
             findings.push(finding(
+                FindingKind::UnresolvedSeed,
                 Level::Warn,
                 format!("PDA seed `{unresolved}` comes from an instruction argument — not verified"),
                 None,
@@ -155,6 +175,7 @@ pub fn declared_findings(specs: &[idl::AccountSpec], node: &Node) -> Vec<Finding
             && expected != actual.key
         {
             findings.push(finding(
+                FindingKind::PdaMismatch,
                 Level::Error,
                 "PDA does not match the seeds declared in the IDL".into(),
                 Some(expected),
@@ -175,10 +196,11 @@ pub fn state_findings(
     for (i, account) in node.accounts.iter().enumerate() {
         let Some(info) = state.get(&account.key) else { continue };
         let role = roles.get(i).cloned().unwrap_or_default();
-        let finding = |level, message: String, expected, actual| Finding {
+        let finding = |kind, level, message: String, expected, actual| Finding {
             index: i,
             role: role.clone(),
             key: account.key.clone(),
+            kind,
             level,
             message,
             expected,
@@ -193,6 +215,7 @@ pub fn state_findings(
                 let ata = find_ata(&owner, &mint);
                 if ata.as_deref() != Some(account.key.as_str()) {
                     findings.push(finding(
+                        FindingKind::NotAta,
                         Level::Error,
                         "not the associated token account for this owner and mint".to_string(),
                         ata,
@@ -208,6 +231,7 @@ pub fn state_findings(
             && info.lamports < minimum
         {
             findings.push(finding(
+                FindingKind::BelowRent,
                 Level::Warn,
                 "below the rent-exempt minimum".to_string(),
                 Some(format!("{:.9} SOL", minimum as f64 / 1e9)),
