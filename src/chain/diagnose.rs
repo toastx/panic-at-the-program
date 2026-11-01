@@ -3,6 +3,53 @@ use serde_json::Value;
 use super::solana::{Node, Status};
 use super::validate::{Finding, FindingKind, Level, SYSTEM, TOKEN};
 
+/// Identity of a diagnostic that only a log line, an IDL, or a config can
+/// supply — the ones with no numeric code to key on.
+///
+/// An enum rather than a string because these ids are matched across modules:
+/// [`crate::chain::idl`] drops `AnchorUserRange` and promotes `ClassInferred`
+/// by id, and a typo in a free-form string would silently stop matching
+/// instead of failing to compile.
+///
+/// Declared in label order: `finalize` sorts by id within a tier, so the
+/// variant order is the render order.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum LogId {
+    AccountConstraint,
+    AccountInUse,
+    AnchorUserRange,
+    ClassInferred,
+    CuExceeded,
+    FlavorInferred,
+    NamePatpToml,
+    NameUnnamed,
+    ProgramPanic,
+    RentShortfall,
+    SignatureMissing,
+    Slippage,
+    ValueMismatch,
+}
+
+impl LogId {
+    fn label(self) -> &'static str {
+        match self {
+            Self::AccountConstraint => "account.constraint",
+            Self::AccountInUse => "account.in_use",
+            Self::AnchorUserRange => "anchor.user_range",
+            Self::ClassInferred => "class.inferred",
+            Self::CuExceeded => "cu.exceeded",
+            Self::FlavorInferred => "flavor.inferred",
+            Self::NamePatpToml => "name.patp_toml",
+            Self::NameUnnamed => "name.unnamed",
+            Self::ProgramPanic => "program.panic",
+            Self::RentShortfall => "rent.shortfall",
+            Self::SignatureMissing => "signature.missing",
+            Self::Slippage => "slippage",
+            Self::ValueMismatch => "value.mismatch",
+        }
+    }
+}
+
 /// Identity of one diagnostic, used for deduplication and ordering.
 ///
 /// Carries enough context that two genuinely different diagnostics never
@@ -21,7 +68,7 @@ pub enum DiagnosticId {
         code: u32,
     },
     Runtime(String),
-    Log(&'static str),
+    Log(LogId),
     Finding {
         kind: FindingKind,
         instruction: usize,
@@ -39,7 +86,7 @@ impl std::fmt::Display for DiagnosticId {
                 None => write!(f, "custom.{code}"),
             },
             Self::Runtime(name) => write!(f, "runtime.{name}"),
-            Self::Log(id) => write!(f, "{id}"),
+            Self::Log(id) => write!(f, "{}", id.label()),
             Self::Finding { kind, .. } => write!(f, "fix.{kind:?}"),
             Self::Other => write!(f, "unknown"),
         }
@@ -697,7 +744,7 @@ fn anchor_notes(anchor: &AnchorLog) -> Vec<Note> {
             expected: Some(expected.clone()),
             actual: Some(actual.clone()),
             ..Note::new(
-                DiagnosticId::Log("value.mismatch"),
+                DiagnosticId::Log(LogId::ValueMismatch),
                 Tier::Fix,
                 "the value the program expected differs from the one passed".to_string(),
             )
@@ -705,7 +752,7 @@ fn anchor_notes(anchor: &AnchorLog) -> Vec<Note> {
     }
     if let Some(account) = &anchor.account {
         out.push(Note::new(
-            DiagnosticId::Log("account.constraint"),
+            DiagnosticId::Log(LogId::AccountConstraint),
             Tier::Span,
             format!("account `{account}` failed the constraint"),
         ));
@@ -749,7 +796,7 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
         && n >= ANCHOR_USER_OFFSET
     {
         notes.push(Note::new(
-            DiagnosticId::Log("anchor.user_range"),
+            DiagnosticId::Log(LogId::AnchorUserRange),
             Tier::Note,
             format!(
                 "program-defined error #{} — check the program's error enum",
@@ -763,7 +810,7 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
         && let Some(missing) = unsigned_accounts(&nodes[index])
     {
         notes.push(Note::new(
-            DiagnosticId::Log("signature.missing"),
+            DiagnosticId::Log(LogId::SignatureMissing),
             Tier::Note,
             format!("no signature from: {missing}"),
         ));
@@ -801,7 +848,7 @@ pub fn log_notes(code: &Code, logs: &[String], cu: u32, cu_limit: u32) -> Vec<No
         || matches!(code, Code::Named(name) if name == "ComputeBudgetExceeded")
     {
         out.push(note(
-            "cu.exceeded",
+            LogId::CuExceeded,
             format!(
                 "ran out of compute: {cu} of {cu_limit} units used — raise it with ComputeBudget::SetComputeUnitLimit"
             ),
@@ -815,14 +862,14 @@ pub fn log_notes(code: &Code, logs: &[String], cu: u32, cu_limit: u32) -> Vec<No
             .collect();
         out.push(match numbers.as_slice() {
             [have, need, ..] if need > have => note(
-                "rent.shortfall",
+                LogId::RentShortfall,
                 format!(
                     "fund the account with {:.9} more SOL to reach the rent-exempt minimum",
                     (need - have) as f64 / 1e9
                 ),
             ),
             _ => note(
-                "rent.shortfall",
+                LogId::RentShortfall,
                 "an account is below the rent-exempt minimum — fund it first".to_string(),
             ),
         });
@@ -830,21 +877,21 @@ pub fn log_notes(code: &Code, logs: &[String], cu: u32, cu_limit: u32) -> Vec<No
 
     if text.contains("already in use") {
         out.push(note(
-            "account.in_use",
+            LogId::AccountInUse,
             "the account already exists — change the seed, or use init_if_needed".to_string(),
         ));
     }
 
     if text.contains("slippage") {
         out.push(note(
-            "slippage",
+            LogId::Slippage,
             "the quote moved before the transaction landed — widen the tolerance or requote".to_string(),
         ));
     }
 
     if text.contains("access violation") || text.contains("panicked at") {
         out.push(note(
-            "program.panic",
+            LogId::ProgramPanic,
             "the program panicked — check unwraps and arithmetic in that instruction".to_string(),
         ));
     }
@@ -1002,14 +1049,14 @@ pub fn add_findings(failure: &mut Failure, instruction: usize, findings: &[Findi
         // The evidence names the account, so the class's inferred advice is now
         // a fact. Other guesses are not corroborated by it.
         for note in &mut failure.notes {
-            if note.confidence == Confidence::Likely && note.id == DiagnosticId::Log("class.inferred") {
+            if note.confidence == Confidence::Likely && note.id == DiagnosticId::Log(LogId::ClassInferred) {
                 note.confidence = Confidence::Certain;
             }
         }
         // A declared role beats our own guess at which keys did not sign.
         failure
             .notes
-            .retain(|note| note.id != DiagnosticId::Log("signature.missing"));
+            .retain(|note| note.id != DiagnosticId::Log(LogId::SignatureMissing));
     }
 
     finalize(&mut failure.notes);

@@ -86,7 +86,7 @@ fn test_command(validator: &mut Option<suite::Validator>) -> io::Result<Option<A
         }
         std::process::exit(2);
     }
-    if framework == "anchor" {
+    if framework == suite::Framework::Anchor {
         *validator = suite::Validator::start(&root)?;
         if validator.is_none() {
             eprintln!("solana-test-validator not on PATH — install it to keep failed transactions fetchable");
