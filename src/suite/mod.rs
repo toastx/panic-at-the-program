@@ -31,11 +31,30 @@ pub struct Case {
     pub payer_live: Option<u64>,
 }
 
-pub fn detect(root: &Path) -> Option<(&'static str, Vec<String>)> {
+/// The project's test runner. `Anchor` gates starting a local validator, so
+/// this is matched on, not just printed.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Framework {
+    Anchor,
+    Mollusk,
+    Cargo,
+}
+
+impl std::fmt::Display for Framework {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Anchor => "anchor",
+            Self::Mollusk => "mollusk",
+            Self::Cargo => "cargo",
+        })
+    }
+}
+
+pub fn detect(root: &Path) -> Option<(Framework, Vec<String>)> {
     let owned = |args: &[&str]| args.iter().map(|arg| arg.to_string()).collect();
     if root.join("Anchor.toml").is_file() {
         return Some((
-            "anchor",
+            Framework::Anchor,
             owned(&[
                 "anchor",
                 "test",
@@ -46,13 +65,13 @@ pub fn detect(root: &Path) -> Option<(&'static str, Vec<String>)> {
         ));
     }
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
-    let label = if manifest.contains("mollusk") {
+    let framework = if manifest.contains("mollusk") {
         //TODO
-        "mollusk"
+        Framework::Mollusk
     } else {
-        "cargo"
+        Framework::Cargo
     };
-    Some((label, owned(&["cargo", "test", "--", "--nocapture"])))
+    Some((framework, owned(&["cargo", "test", "--", "--nocapture"])))
 }
 
 pub fn available(program: &str) -> bool {
