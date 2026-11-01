@@ -710,7 +710,7 @@ fn hex(bytes: &[u8]) -> String {
 /// the IDL flavor implies, and infers advice from the name when the program
 /// named the error but not the fix.
 fn name_custom_code(failure: &mut super::diagnose::Failure, program: &str, code: u32, parsed: Option<&Program>) {
-    use super::diagnose::{DiagnosticId, Note, Tier};
+    use super::diagnose::{DiagnosticId, LogId, Note, Tier};
 
     let named = crate::workspace::error_label(program, code)
         .map(|(name, message)| (name, message, true))
@@ -721,7 +721,7 @@ fn name_custom_code(failure: &mut super::diagnose::Failure, program: &str, code:
 
     failure
         .notes
-        .retain(|note| note.id != DiagnosticId::Log("anchor.user_range"));
+        .retain(|note| note.id != DiagnosticId::Log(LogId::AnchorUserRange));
 
     let Some((name, message, from_config)) = named else {
         let (headline, meaning, hint) = super::diagnose::infer_custom(code, parsed.map(|p| p.flavor));
@@ -729,9 +729,9 @@ fn name_custom_code(failure: &mut super::diagnose::Failure, program: &str, code:
         failure.meaning = meaning;
         failure
             .notes
-            .push(Note::new(DiagnosticId::Log("flavor.inferred"), Tier::Note, hint));
+            .push(Note::new(DiagnosticId::Log(LogId::FlavorInferred), Tier::Note, hint));
         failure.notes.push(Note::new(
-            DiagnosticId::Log("name.unnamed"),
+            DiagnosticId::Log(LogId::NameUnnamed),
             Tier::Help,
             format!("name it in patp.toml: [errors.{program}] {code} = \"Name: what it means\""),
         ));
@@ -745,7 +745,7 @@ fn name_custom_code(failure: &mut super::diagnose::Failure, program: &str, code:
     }
     if from_config {
         failure.notes.push(Note::new(
-            DiagnosticId::Log("name.patp_toml"),
+            DiagnosticId::Log(LogId::NamePatpToml),
             Tier::Note,
             "named by your patp.toml error table".to_string(),
         ));
@@ -755,7 +755,7 @@ fn name_custom_code(failure: &mut super::diagnose::Failure, program: &str, code:
     {
         failure.class = Some(class);
         failure.notes.push(Note::maybe(
-            DiagnosticId::Log("class.inferred"),
+            DiagnosticId::Log(LogId::ClassInferred),
             Tier::Help,
             format!("inferred from the name `{name}` — {}", class.help()),
         ));

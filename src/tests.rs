@@ -1426,17 +1426,20 @@ fn class_match_is_deterministic_and_conservative() {
 
 #[test]
 fn notes_dedupe_by_identity_keeping_the_highest_tier() {
-    use diagnose::{DiagnosticId, Note, Tier};
+    use diagnose::{DiagnosticId, LogId, Note, Tier};
 
     let mut notes = vec![
-        Note::new(DiagnosticId::Log("same"), Tier::Help, "help wording".into()),
-        Note::new(DiagnosticId::Log("same"), Tier::Fix, "fix wording".into()),
-        Note::new(DiagnosticId::Log("other"), Tier::Note, "other".into()),
+        Note::new(DiagnosticId::Log(LogId::CuExceeded), Tier::Help, "help wording".into()),
+        Note::new(DiagnosticId::Log(LogId::CuExceeded), Tier::Fix, "fix wording".into()),
+        Note::new(DiagnosticId::Log(LogId::Slippage), Tier::Note, "other".into()),
     ];
     diagnose::finalize(&mut notes);
 
     assert_eq!(notes.len(), 2, "one id, one note");
-    let same = notes.iter().find(|n| n.id == DiagnosticId::Log("same")).unwrap();
+    let same = notes
+        .iter()
+        .find(|n| n.id == DiagnosticId::Log(LogId::CuExceeded))
+        .unwrap();
     assert_eq!(same.tier, Tier::Fix, "the more specific tier survives");
 
     // Idempotent, so calling it at every collection boundary is safe.
@@ -1512,7 +1515,7 @@ fn evidence_promotes_inferred_advice_to_a_fix() {
     // A seeds failure corroborated by the derived PDA differing.
     let mut failure = seeds_failure();
     failure.notes.push(diagnose::Note::maybe(
-        diagnose::DiagnosticId::Log("class.inferred"),
+        diagnose::DiagnosticId::Log(diagnose::LogId::ClassInferred),
         diagnose::Tier::Help,
         "inferred advice".into(),
     ));
@@ -1525,7 +1528,7 @@ fn evidence_promotes_inferred_advice_to_a_fix() {
     let inferred = failure
         .notes
         .iter()
-        .find(|note| note.id == diagnose::DiagnosticId::Log("class.inferred"))
+        .find(|note| note.id == diagnose::DiagnosticId::Log(diagnose::LogId::ClassInferred))
         .unwrap();
     assert_eq!(
         inferred.confidence,
@@ -1544,12 +1547,12 @@ fn evidence_promotes_inferred_advice_to_a_fix() {
     // one piece of evidence must not stamp "certain" on unrelated advice.
     let mut mixed = seeds_failure();
     mixed.notes.push(diagnose::Note::maybe(
-        diagnose::DiagnosticId::Log("class.inferred"),
+        diagnose::DiagnosticId::Log(diagnose::LogId::ClassInferred),
         diagnose::Tier::Help,
         "advice the finding confirms".into(),
     ));
     mixed.notes.push(diagnose::Note::maybe(
-        diagnose::DiagnosticId::Log("some.other.guess"),
+        diagnose::DiagnosticId::Log(diagnose::LogId::ProgramPanic),
         diagnose::Tier::Help,
         "advice the finding says nothing about".into(),
     ));
@@ -1567,13 +1570,13 @@ fn evidence_promotes_inferred_advice_to_a_fix() {
             .unwrap()
             .confidence
     };
-    assert_eq!(by_id("class.inferred"), diagnose::Confidence::Certain);
-    assert_eq!(by_id("some.other.guess"), diagnose::Confidence::Likely);
+    assert_eq!(by_id(diagnose::LogId::ClassInferred), diagnose::Confidence::Certain);
+    assert_eq!(by_id(diagnose::LogId::ProgramPanic), diagnose::Confidence::Likely);
 
     // Uncorroborated, the same advice stays hedged.
     let mut alone = seeds_failure();
     alone.notes.push(diagnose::Note::maybe(
-        diagnose::DiagnosticId::Log("class.inferred"),
+        diagnose::DiagnosticId::Log(diagnose::LogId::ClassInferred),
         diagnose::Tier::Help,
         "inferred advice".into(),
     ));
@@ -1585,7 +1588,7 @@ fn evidence_promotes_inferred_advice_to_a_fix() {
     let still = alone
         .notes
         .iter()
-        .find(|note| note.id == diagnose::DiagnosticId::Log("class.inferred"))
+        .find(|note| note.id == diagnose::DiagnosticId::Log(diagnose::LogId::ClassInferred))
         .unwrap();
     assert_eq!(still.confidence, diagnose::Confidence::Likely);
 }
@@ -1645,7 +1648,7 @@ fn inferred_advice_renders_as_a_guess_not_an_instruction() {
     app.kind = solana::Kind::Tx;
     let failure = app.tx.as_mut().unwrap().failure.as_mut().unwrap();
     failure.notes.push(diagnose::Note::maybe(
-        diagnose::DiagnosticId::Log("class.inferred"),
+        diagnose::DiagnosticId::Log(diagnose::LogId::ClassInferred),
         diagnose::Tier::Help,
         "inferred from the name `InvalidOwner` — check which program owns the account you passed".into(),
     ));
