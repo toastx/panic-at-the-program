@@ -157,7 +157,19 @@ fn test_command(validator: &mut Option<suite::Validator>) -> io::Result<Option<A
 
     let Some(key) = keys.last().cloned() else {
         print!("{output}");
-        eprintln!("no failed transaction in the output — nothing to diagnose");
+        // A build that fails never reaches the tests, so there is nothing to
+        // diagnose for a reason the generic message would hide.
+        match suite::build_error(&output) {
+            Some(build) => {
+                let plural = if build.count == 1 { "error" } else { "errors" };
+                eprintln!("the build failed with {} {plural} — the suite never ran", build.count);
+                eprintln!("  {}", build.headline);
+                if let Some(location) = &build.location {
+                    eprintln!("  at {location}");
+                }
+            }
+            None => eprintln!("no failed transaction in the output — nothing to diagnose"),
+        }
         return Ok(None);
     };
     eprintln!("{} failed transaction(s) on {cluster}", keys.len());

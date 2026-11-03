@@ -196,6 +196,55 @@ fn wallet(root: &Path) -> Option<String> {
     plausible.then_some(address)
 }
 
+// ---------------------------------------------------------------- build errors
+
+/// A compile error from the suite's own build.
+pub struct BuildError {
+    /// The compiler's first error line, verbatim.
+    pub headline: String,
+    /// The `-->` line rustc points with, when it printed one.
+    pub location: Option<String>,
+    /// How many error lines the build printed, not just the first.
+    pub count: usize,
+}
+
+/// The first compile error in the suite's output.
+///
+/// Only meaningful when the suite produced no transactions: a build that fails
+/// never reaches the tests, so "no failed transaction" is the wrong thing to
+/// tell the user — the error they need is further up their scrollback.
+pub fn build_error(output: &str) -> Option<BuildError> {
+    // The suite ran, so any `error:` lines after this are its own assertions
+    // failing, not the build refusing to produce a binary.
+    if output.contains("test result:") || output.contains(" passing") {
+        return None;
+    }
+    let lines: Vec<&str> = output.lines().map(str::trim_end).collect();
+    let errors: Vec<usize> = (0..lines.len()).filter(|&i| is_build_error(lines[i])).collect();
+    let &first = errors.first()?;
+    Some(BuildError {
+        headline: lines[first].trim().to_string(),
+        // rustc puts the path on the next line; tsc puts it in the error line.
+        location: lines
+            .get(first + 1)
+            .map(|line| line.trim())
+            .filter(|line| line.starts_with("--> "))
+            .map(|line| line.trim_start_matches("--> ").to_string()),
+        count: errors.len(),
+    })
+}
+
+/// Whether a line is a compiler refusing to build, as opposed to a test
+/// reporting a failure. Kept narrow on purpose: a false positive would blame
+/// the build for a problem that is really in the program.
+fn is_build_error(line: &str) -> bool {
+    let line = line.trim();
+    // `error[E0308]: ..` from rustc, `error TS2345: ..` from tsc, and anchor's
+    // own `Error: ..`. Cargo's bare `error: could not compile ..` is a summary
+    // of errors already listed, so it is not a headline worth showing.
+    line.starts_with("error[E") || line.contains(" - error TS") || line.starts_with("Error: ")
+}
+
 pub fn failed_signatures(output: &str, cluster: &str) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     for token in output.split(|c: char| !c.is_ascii_alphanumeric()) {
