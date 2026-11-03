@@ -1,3 +1,5 @@
-pub(crate) mod screens;
-pub(crate) mod state;
-pub(crate) mod widgets;
+pub(crate) mod diagnose;
+pub(crate) mod errors;
+pub(crate) mod idl;
+pub(crate) mod solana;
+pub(crate) mod validate;

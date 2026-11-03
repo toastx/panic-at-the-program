@@ -118,10 +118,10 @@ fn kill(slot: &Mutex<Option<Child>>) {
 impl Validator {
     pub fn start(root: &Path) -> std::io::Result<Option<Self>> {
         let wallet = wallet(root);
-        if crate::chain::solana::healthy("localnet") {
+        if crate::app::solana::healthy("localnet") {
             eprintln!("reusing the validator already serving localnet");
             if let Some(wallet) = &wallet {
-                crate::chain::solana::airdrop("localnet", wallet, TOP_UP);
+                crate::app::solana::airdrop("localnet", wallet, TOP_UP);
             }
             return Ok(Some(Validator(Arc::default())));
         }
@@ -140,7 +140,7 @@ impl Validator {
         };
         let validator = Validator(Arc::new(Mutex::new(Some(child))));
         for _ in 0..100 {
-            if crate::chain::solana::healthy("localnet") {
+            if crate::app::solana::healthy("localnet") {
                 return Ok(Some(validator));
             }
             let exited = validator
@@ -192,7 +192,7 @@ fn wallet(root: &Path) -> Option<String> {
     let address = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let plausible = (32..=44).contains(&address.len())
         && address.chars().all(|c| c.is_ascii_alphanumeric())
-        && crate::chain::solana::bs58_decode(&address).len() == 32;
+        && crate::app::solana::bs58_decode(&address).len() == 32;
     plausible.then_some(address)
 }
 
@@ -248,17 +248,17 @@ fn is_build_error(line: &str) -> bool {
 pub fn failed_signatures(output: &str, cluster: &str) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     for token in output.split(|c: char| !c.is_ascii_alphanumeric()) {
-        if !crate::chain::solana::is_signature(token)
+        if !crate::app::solana::is_signature(token)
             || token.len() > 90
             || found.iter().any(|seen| seen == token)
-            || crate::chain::solana::bs58_decode(token).len() != 64
+            || crate::app::solana::bs58_decode(token).len() != 64
         {
             continue;
         }
-        if crate::chain::solana::fetch(cluster, token).is_ok_and(|value| !value["result"]["meta"]["err"].is_null()) {
+        if crate::app::solana::fetch(cluster, token).is_ok_and(|value| !value["result"]["meta"]["err"].is_null()) {
             found.push(token.to_string());
         } else {
-            crate::chain::solana::evict(cluster, token);
+            crate::app::solana::evict(cluster, token);
         }
     }
     found
@@ -395,10 +395,10 @@ pub fn captured(captures: &[tap::Capture]) -> Vec<Case> {
         let taken = cases.iter().filter(|seen| seen.name.starts_with(&name)).count();
         let decoded = capture.transaction.as_ref().and_then(|(transaction, encoding)| {
             let bytes = match encoding.as_str() {
-                "base64" => crate::chain::solana::base64_decode(transaction),
-                _ => crate::chain::solana::bs58_decode(transaction),
+                "base64" => crate::app::solana::base64_decode(transaction),
+                _ => crate::app::solana::bs58_decode(transaction),
             };
-            crate::chain::solana::decode_message(&bytes)
+            crate::app::solana::decode_message(&bytes)
         });
         let complete = decoded.as_ref().is_none_or(|message| message.accounts_complete);
         let message = decoded.map(|message| {
@@ -442,12 +442,12 @@ pub fn add_payer_balance(cases: &mut [Case], cluster: &str) {
         };
         let cached = format!("account-{key}");
         // That cache never expires, and last run's balance would be a lie.
-        crate::chain::solana::evict(cluster, &cached);
-        let Ok(value) = crate::chain::solana::fetch_account(cluster, &key) else {
+        crate::app::solana::evict(cluster, &cached);
+        let Ok(value) = crate::app::solana::fetch_account(cluster, &key) else {
             continue;
         };
-        let _ = crate::chain::solana::store(CLUSTER, &cached, &value);
-        case.payer_live = Some(crate::chain::solana::parse_account(&key, &value).lamports);
+        let _ = crate::app::solana::store(CLUSTER, &cached, &value);
+        case.payer_live = Some(crate::app::solana::parse_account(&key, &value).lamports);
     }
 }
 
@@ -504,7 +504,7 @@ pub fn stash(cases: &[Case]) -> Vec<String> {
                 key if key.is_empty() => format!("failure-{}", index + 1),
                 key => key,
             };
-            crate::chain::solana::store(CLUSTER, &key, &transaction_json(case)).ok()?;
+            crate::app::solana::store(CLUSTER, &key, &transaction_json(case)).ok()?;
             Some(key)
         })
         .collect()
@@ -544,7 +544,7 @@ Error: AnchorError caused by account: vault. Error Code: ConstraintSeeds. Error 
             let capture = rpc_tap::capture(request.as_bytes(), response.as_bytes()).expect("captured");
             let cases = super::captured(std::slice::from_ref(&capture));
             let case = cases.into_iter().next().expect("one case");
-            let tx = crate::chain::solana::parse("t", super::CLUSTER, &super::transaction_json(&case));
+            let tx = crate::app::solana::parse("t", super::CLUSTER, &super::transaction_json(&case));
             (case, tx)
         };
 
@@ -609,7 +609,7 @@ Error: AnchorError caused by account: vault. Error Code: ConstraintSeeds. Error 
 
         // the reconstructed response drives the normal parse + diagnose path
         let cases = super::cases(MOCHA);
-        let tx = crate::chain::solana::parse("deposit", super::CLUSTER, &super::transaction_json(&cases[0]));
+        let tx = crate::app::solana::parse("deposit", super::CLUSTER, &super::transaction_json(&cases[0]));
         let failure = tx.failure.expect("diagnosed");
         assert_eq!(tx.nodes.len(), 1);
         assert_eq!(tx.cu, 4521);

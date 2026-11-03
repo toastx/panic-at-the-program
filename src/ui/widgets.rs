@@ -2,7 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::state::{App, Click, clusters};
-use crate::chain::solana::{Kind, Node, Status, Tx};
+use crate::app::solana::{Kind, Node, Status, Tx};
 
 pub const ACCENT: Color = Color::Rgb(139, 122, 255);
 pub const OK: Color = Color::Rgb(74, 222, 128);

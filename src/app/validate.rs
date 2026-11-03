@@ -1,14 +1,7 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 
-use serde_json::Value;
-
 use super::idl;
-use super::solana::{self, Node, Tx, bs58_decode, bs58_encode};
-
-pub const TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-pub const ATA: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
-pub const SYSTEM: &str = "11111111111111111111111111111111";
+use super::solana::{self, ATA, AccountState, Node, SYSTEM, TOKEN, Tx, bs58_decode, bs58_encode};
 
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum Level {
@@ -41,59 +34,6 @@ pub struct Finding {
     pub actual: Option<String>,
 }
 
-#[derive(Clone)]
-pub struct State {
-    pub owner: String,
-    pub lamports: u64,
-    pub data: Vec<u8>,
-}
-
-thread_local! {
-    static STATES: RefCell<HashMap<String, Option<State>>> = RefCell::new(HashMap::new());
-    static RENT: RefCell<HashMap<usize, u64>> = RefCell::new(HashMap::new());
-}
-
-fn states(cluster: &str, keys: &[String]) -> HashMap<String, State> {
-    let missing: Vec<String> = keys
-        .iter()
-        .filter(|key| STATES.with(|c| !c.borrow().contains_key(&format!("{cluster}/{key}"))))
-        .cloned()
-        .collect();
-    if !missing.is_empty() {
-        let fetched = solana::accounts_info_sparse(cluster, &missing).unwrap_or_default();
-        STATES.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            for (key, account) in missing.iter().zip(fetched) {
-                let state = account.as_ref().map(|account| State {
-                    owner: account["owner"].as_str().unwrap_or_default().to_string(),
-                    lamports: account["lamports"].as_u64().unwrap_or(0),
-                    data: account
-                        .pointer("/data/0")
-                        .and_then(Value::as_str)
-                        .map(solana::base64_decode)
-                        .unwrap_or_default(),
-                });
-                cache.insert(format!("{cluster}/{key}"), state);
-            }
-        });
-    }
-    keys.iter()
-        .filter_map(|key| {
-            let state = STATES.with(|c| c.borrow().get(&format!("{cluster}/{key}")).cloned())??;
-            Some((key.clone(), state))
-        })
-        .collect()
-}
-
-fn rent_exempt_minimum(cluster: &str, size: usize) -> Option<u64> {
-    if let Some(hit) = RENT.with(|cache| cache.borrow().get(&size).copied()) {
-        return Some(hit);
-    }
-    let value = solana::minimum_balance(cluster, size).ok()?;
-    RENT.with(|cache| cache.borrow_mut().insert(size, value));
-    Some(value)
-}
-
 pub fn check(cluster: &str, tx: &Tx, index: usize) -> Vec<Finding> {
     let Some(node) = tx.nodes.get(index) else {
         return Vec::new();
@@ -109,8 +49,8 @@ pub fn check(cluster: &str, tx: &Tx, index: usize) -> Vec<Finding> {
     }
 
     let keys: Vec<String> = node.accounts.iter().map(|a| a.key.clone()).collect();
-    let state = states(cluster, &keys);
-    let rent = |size: usize| rent_exempt_minimum(cluster, size);
+    let state = solana::account_states(cluster, &keys);
+    let rent = |size: usize| solana::rent_exempt_minimum(cluster, size);
     findings.extend(state_findings(node, &roles, &state, rent));
     findings
 }
@@ -201,7 +141,7 @@ pub fn declared_findings(specs: &[idl::AccountSpec], node: &Node) -> Vec<Finding
 pub fn state_findings(
     node: &Node,
     roles: &[String],
-    state: &HashMap<String, State>,
+    state: &HashMap<String, AccountState>,
     rent: impl Fn(usize) -> Option<u64>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();

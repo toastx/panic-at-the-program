@@ -3,8 +3,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding
 
 use super::state::{App, Click, Mode, Screen};
 use super::widgets::*;
-use crate::chain::diagnose::{Confidence, Failure, Tier};
-use crate::chain::solana::{Status, Tx};
+use crate::app::diagnose::{Confidence, Failure, Tier};
+use crate::app::solana::{Status, Tx};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     app.hits.clear();
@@ -125,7 +125,7 @@ fn require_tx<'a>(f: &mut Frame, area: Rect, app: &'a App, title: &str) -> Optio
 /// Who paid, and what they had. A recorded pre-balance is what the chain saw; a
 /// live snapshot is only what the wallet held when we asked, which is all there
 /// is for a transaction that never landed. The wording keeps them apart.
-fn payer_line(tx: &crate::chain::solana::Tx) -> Option<(String, String)> {
+fn payer_line(tx: &crate::app::solana::Tx) -> Option<(String, String)> {
     match (&tx.payer, tx.accounts.first(), tx.payer_live) {
         (Some((key, lamports)), _, _) => Some((key.clone(), format!("held {:.4} SOL", lamports_sol(*lamports)))),
         (None, Some(account), Some(lamports)) => Some((
@@ -150,7 +150,7 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
     };
 
     let path = tx.failure_path();
-    let mut movers: Vec<&crate::chain::solana::BalanceChange> =
+    let mut movers: Vec<&crate::app::solana::BalanceChange> =
         tx.balances.iter().filter(|b| b.before != b.after).collect();
     movers.sort_by(|a, b| (b.after - b.before).abs().total_cmp(&(a.after - a.before).abs()));
     movers.truncate(3);
@@ -482,16 +482,16 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
             Span::raw(node.program.clone()),
         ]),
     ];
-    let decoded = crate::chain::idl::idl(&tx.cluster, &node.program)
-        .and_then(|idl| crate::chain::idl::instruction(&idl, &crate::chain::solana::bs58_decode(&node.data)));
+    let decoded = crate::app::idl::idl(&tx.cluster, &node.program)
+        .and_then(|idl| crate::app::idl::instruction(&idl, &crate::app::solana::bs58_decode(&node.data)));
     // Cached for the failing instruction, which is the one the diagnosis is
     // about; any other instruction the user drills into is resolved on demand.
     let computed;
-    let findings: &[crate::chain::validate::Finding] =
+    let findings: &[crate::app::validate::Finding] =
         if Some(index) == tx.failure.as_ref().and_then(|failure| failure.node) {
             &tx.findings
         } else {
-            computed = crate::chain::validate::check(&tx.cluster, tx, index);
+            computed = crate::app::validate::check(&tx.cluster, tx, index);
             &computed
         };
     if let Some(decoded) = &decoded {
@@ -508,7 +508,7 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
             ),
         ]));
     } else {
-        match crate::chain::solana::decode_instruction(&node.program, &node.data) {
+        match crate::app::solana::decode_instruction(&node.program, &node.data) {
             Some((name, fields)) => facts.push(Line::from(vec![
                 Span::styled("Data        ", muted()),
                 Span::styled(name, Style::new().fg(Color::Rgb(96, 165, 250)).bold()),
@@ -551,8 +551,8 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
             .take(rows[3].height.saturating_sub(1) as usize)
             .map(|finding| {
                 let (glyph, color) = match finding.level {
-                    crate::chain::validate::Level::Error => ("✕", BAD),
-                    crate::chain::validate::Level::Warn => ("⚠", Color::Rgb(234, 179, 8)),
+                    crate::app::validate::Level::Error => ("✕", BAD),
+                    crate::app::validate::Level::Warn => ("⚠", Color::Rgb(234, 179, 8)),
                 };
                 let mut spans = vec![
                     Span::styled(format!("{glyph} "), Style::new().fg(color)),
@@ -607,8 +607,8 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
         .map(|(i, account)| {
             let flagged = findings.iter().find(|finding| finding.index == i);
             let (glyph, glyph_style) = match flagged.map(|f| f.level) {
-                Some(crate::chain::validate::Level::Error) => ("✕ ", Style::new().fg(BAD)),
-                Some(crate::chain::validate::Level::Warn) => ("⚠ ", Style::new().fg(Color::Rgb(234, 179, 8))),
+                Some(crate::app::validate::Level::Error) => ("✕ ", Style::new().fg(BAD)),
+                Some(crate::app::validate::Level::Warn) => ("⚠ ", Style::new().fg(Color::Rgb(234, 179, 8))),
                 None => ("● ", Style::new().fg(if account.writable { ACCENT } else { MUTED })),
             };
             ListItem::new(Line::from(vec![
@@ -721,7 +721,7 @@ fn flow(f: &mut Frame, area: Rect, app: &mut App) {
     let Some((tx, inner)) = require_tx(f, area, app, "VALUE FLOW") else {
         return;
     };
-    let transfers = crate::chain::solana::transfers(tx);
+    let transfers = crate::app::solana::transfers(tx);
     if transfers.is_empty() {
         f.render_widget(
             wrapped(
@@ -920,7 +920,7 @@ fn compact_keys(line: &str) -> String {
         .join(" ")
 }
 
-fn call_path(tx: &crate::chain::solana::Tx, index: usize) -> Vec<String> {
+fn call_path(tx: &crate::app::solana::Tx, index: usize) -> Vec<String> {
     tx.ancestors(index)
         .into_iter()
         .map(|i| node_label(&tx.nodes[i]))
@@ -1016,7 +1016,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
 
     if !node.data.is_empty() {
         lines.push(Line::raw(""));
-        match crate::chain::solana::decode_instruction(&node.program, &node.data) {
+        match crate::app::solana::decode_instruction(&node.program, &node.data) {
             Some((_, fields)) => {
                 lines.push(Line::styled("DATA — parsed", muted()));
                 lines.extend(fields.into_iter().map(|(key, value)| {
@@ -1185,14 +1185,14 @@ fn raw(f: &mut Frame, area: Rect, app: &mut App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     let cache_key = match app.kind {
-        crate::chain::solana::Kind::Tx => app.tx().map(|tx| tx.signature.clone()),
-        crate::chain::solana::Kind::Account => app.account.as_ref().map(|a| format!("account-{}", a.key)),
+        crate::app::solana::Kind::Tx => app.tx().map(|tx| tx.signature.clone()),
+        crate::app::solana::Kind::Account => app.account.as_ref().map(|a| format!("account-{}", a.key)),
     };
     let Some(cache_key) = cache_key else {
         f.render_widget(wrapped("nothing loaded — press o", muted()), inner);
         return;
     };
-    let text = crate::chain::solana::load(&app.cluster, &cache_key)
+    let text = crate::app::solana::load(&app.cluster, &cache_key)
         .and_then(|v| serde_json::to_string_pretty(&v).ok())
         .unwrap_or_else(|| "cache entry unavailable".to_string());
     f.render_widget(
@@ -1220,7 +1220,7 @@ fn require_account<'a>(
     area: Rect,
     app: &'a App,
     title: &str,
-) -> Option<(&'a crate::chain::solana::AccountInfo, Rect)> {
+) -> Option<(&'a crate::app::solana::AccountInfo, Rect)> {
     let block = panel(title, !app.focus_nav);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -1238,13 +1238,13 @@ fn require_account<'a>(
 
 fn decode_account_fields(
     cluster: &str,
-    account: &crate::chain::solana::AccountInfo,
+    account: &crate::app::solana::AccountInfo,
 ) -> Option<(String, Vec<(String, String)>)> {
-    if let Some((layout, fields)) = crate::chain::solana::decode_account(account) {
+    if let Some((layout, fields)) = crate::app::solana::decode_account(account) {
         return Some((layout.to_string(), fields));
     }
-    let idl = crate::chain::idl::idl(cluster, &account.owner)?;
-    crate::chain::idl::account(&idl, &account.data)
+    let idl = crate::app::idl::idl(cluster, &account.owner)?;
+    crate::app::idl::account(&idl, &account.data)
 }
 
 fn account_info(f: &mut Frame, area: Rect, app: &mut App) {
@@ -1345,7 +1345,7 @@ fn account_data(f: &mut Frame, area: Rect, app: &mut App) {
     let dump = panel("RAW (hex)", false);
     let dump_inner = dump.inner(rows[1]);
     f.render_widget(dump, rows[1]);
-    let lines: Vec<Line> = crate::chain::solana::hex_dump(&account.data, scroll, dump_inner.height as usize)
+    let lines: Vec<Line> = crate::app::solana::hex_dump(&account.data, scroll, dump_inner.height as usize)
         .into_iter()
         .map(|(offset, hex, ascii)| {
             Line::from(vec![
@@ -1441,7 +1441,7 @@ fn diagnostic_span(tx: &Tx, failure: &Failure) -> Vec<Line<'static>> {
 ///
 /// Values go on their own lines: a 44-character pubkey appended to a note would
 /// wrap mid-key, and a wrapped key cannot be copied in one piece.
-fn diagnostic_note(note: &crate::chain::diagnose::Note) -> Vec<Line<'static>> {
+fn diagnostic_note(note: &crate::app::diagnose::Note) -> Vec<Line<'static>> {
     let (keyword, color) = match note.tier {
         Tier::Note => ("   = note: ", MUTED),
         Tier::Help => ("   = help: ", ACCENT),
