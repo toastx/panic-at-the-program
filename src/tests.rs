@@ -2,11 +2,12 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::backend::TestBackend;
 use ratatui::prelude::*;
 
-use crate::app::screens;
-use crate::app::state::{self as app, App, Click, Mode, Screen};
-use crate::chain::{diagnose, idl, solana, validate};
+use crate::app::errors::{self, anchor};
+use crate::app::{diagnose, idl, solana, validate};
 use crate::on_key;
 use crate::suite;
+use crate::ui::screens;
+use crate::ui::state::{self as app, App, Click, Mode, Screen};
 use crate::workspace;
 use serde_json::{Value, json};
 use solana::Status;
@@ -793,8 +794,8 @@ fn validation_flags_token_and_rent_problems_from_account_state() {
     let mut state = HashMap::new();
     state.insert(
         "Vau1t111".to_string(),
-        validate::State {
-            owner: validate::TOKEN.to_string(),
+        solana::AccountState {
+            owner: solana::TOKEN.to_string(),
             lamports: 100,
             data,
         },
@@ -819,7 +820,7 @@ fn validation_flags_token_and_rent_problems_from_account_state() {
     assert_eq!(rent.expected.as_deref(), Some("0.002039280 SOL"));
     assert_eq!(rent.actual.as_deref(), Some("0.000000100 SOL"));
 
-    let empty: HashMap<String, validate::State> = HashMap::new();
+    let empty: HashMap<String, solana::AccountState> = HashMap::new();
     assert!(validate::state_findings(node, &[], &empty, |_| None).is_empty());
 }
 
@@ -838,7 +839,7 @@ fn anchor_logs_yield_account_source_and_expected_values() {
     .map(String::from)
     .to_vec();
 
-    let parsed = diagnose::anchor_log(&logs);
+    let parsed = anchor::log(&logs);
     assert_eq!(parsed.account.as_deref(), Some("vault"));
     assert_eq!(parsed.name.as_deref(), Some("ConstraintSeeds"));
     assert_eq!(parsed.number, Some(2006));
@@ -855,7 +856,7 @@ fn anchor_logs_yield_account_source_and_expected_values() {
     let thrown = ["Program log: AnchorError thrown in programs/vault/src/lib.rs:88. Error Code: Unauthorized. Error Number: 6000. Error Message: not the owner."]
         .map(String::from)
         .to_vec();
-    let parsed = diagnose::anchor_log(&thrown);
+    let parsed = anchor::log(&thrown);
     assert_eq!(parsed.source.as_deref(), Some("programs/vault/src/lib.rs:88"));
     assert_eq!(parsed.name.as_deref(), Some("Unauthorized"));
     assert_eq!(parsed.number, Some(6000));
@@ -1373,15 +1374,42 @@ fn seeds_failure() -> diagnose::Failure {
 }
 
 #[test]
+fn anchor_codes_only_explain_programs_patp_records_as_anchor() {
+    let nodes = solana::parse("s", "devnet", &fixture()).nodes;
+    let seeds = json!({"InstructionError": [0, {"Custom": 2006}]});
+    let program = {
+        let failure = diagnose::failure(&seeds, &nodes, &[], 0, 0).unwrap();
+        nodes[failure.node.unwrap()].program.clone()
+    };
+    let headline = |kind: &str| {
+        workspace::use_text(&format!("[idl.kind]\n{program} = \"{kind}\"\n"));
+        diagnose::failure(&seeds, &nodes, &[], 0, 0).unwrap().headline
+    };
+
+    assert_eq!(headline("anchor"), "ConstraintSeeds");
+    assert_eq!(headline("anchor-legacy"), "ConstraintSeeds");
+    // A Shank program's 2006 is its own enum's entry, not Anchor's.
+    assert_eq!(headline("shank"), "custom program error 2006");
+    assert_eq!(headline("codama"), "custom program error 2006");
+
+    // Nothing recorded: most programs are Anchor, so read it as one.
+    workspace::use_text("");
+    assert_eq!(
+        diagnose::failure(&seeds, &nodes, &[], 0, 0).unwrap().headline,
+        "ConstraintSeeds"
+    );
+}
+
+#[test]
 fn anchor_tsv_is_wellformed() {
-    let rows: Vec<diagnose::Known> = diagnose::anchor_rows().collect();
+    let rows: Vec<(u32, errors::Known)> = anchor::rows().collect();
     assert_eq!(rows.len(), 77, "anchor-lang 0.32.2 declares 77 error codes");
 
-    for known in &rows {
-        assert!(!known.name.is_empty(), "{} has no name", known.code);
-        assert!(!known.message.is_empty(), "{} has no message", known.code);
+    for (code, known) in &rows {
+        assert!(!known.name.is_empty(), "{code} has no name");
+        assert!(!known.message.is_empty(), "{code} has no message");
     }
-    let codes: Vec<u32> = rows.iter().map(|known| known.code).collect();
+    let codes: Vec<u32> = rows.iter().map(|(code, _)| *code).collect();
     let mut sorted = codes.clone();
     sorted.sort_unstable();
     sorted.dedup();
@@ -1391,10 +1419,7 @@ fn anchor_tsv_is_wellformed() {
     for code in [103, 1002, 1500, 2039, 2506, 3017, 4102, 5000] {
         assert!(codes.contains(&code), "missing code {code}");
     }
-    assert_eq!(
-        diagnose::anchor_rows().find(|known| known.code == 2006).unwrap().class,
-        Some(diagnose::Class::Seeds)
-    );
+    assert_eq!(anchor::lookup(2006).unwrap().class, Some(errors::Class::Seeds));
 }
 
 #[test]
@@ -1449,7 +1474,7 @@ error: test failed, to rerun pass `-p vault --lib`
 
 #[test]
 fn runtime_tsv_is_wellformed() {
-    let rows: Vec<diagnose::RuntimeError> = diagnose::runtime_rows().collect();
+    let rows: Vec<errors::Known> = errors::solana::runtime_rows().collect();
     assert_eq!(rows.len(), 89, "the two runtime error enums declare 89 variants");
 
     for row in &rows {
@@ -1492,26 +1517,26 @@ fn runtime_tsv_is_wellformed() {
         assert!(names.contains(&name), "missing {name}");
     }
     let seeds = rows.iter().find(|row| row.name == "InvalidSeeds").unwrap();
-    assert_eq!(seeds.class, Some(diagnose::Class::Seeds));
+    assert_eq!(seeds.class, Some(errors::Class::Seeds));
     assert!(seeds.help.contains("re-derive the PDA"));
 }
 
 #[test]
 fn every_class_has_tokens_and_help() {
-    for &class in diagnose::Class::ALL {
+    for &class in errors::Class::ALL {
         assert!(!class.tokens().is_empty(), "{class:?} has no vocabulary");
         assert!(!class.help().is_empty(), "{class:?} has no help");
-        assert_eq!(diagnose::Class::from_name(&format!("{class:?}")), Some(class));
+        assert_eq!(errors::Class::from_name(&format!("{class:?}")), Some(class));
     }
 }
 
 #[test]
 fn class_match_is_deterministic_and_conservative() {
-    use diagnose::Class::*;
+    use errors::Class::*;
 
     // Real SPL Token / Token-2022 / DeFi error names. None means the matcher
     // must stay silent: no diagnosis beats a confidently wrong fix.
-    let cases: &[(&str, Option<diagnose::Class>)] = &[
+    let cases: &[(&str, Option<errors::Class>)] = &[
         ("OwnerMismatch", Some(WrongOwner)),
         ("InvalidOwner", Some(WrongOwner)),
         ("InvalidMint", Some(Mint)),
@@ -1542,7 +1567,7 @@ fn class_match_is_deterministic_and_conservative() {
         ("Zork", None),
     ];
     for (name, want) in cases {
-        assert_eq!(diagnose::classify_name(name), *want, "{name}");
+        assert_eq!(errors::classify_name(name), *want, "{name}");
     }
 }
 
@@ -1792,15 +1817,15 @@ fn uncased_error_names_terminate() {
     // nor lower case, so tokenize looped forever pushing empty strings. Reachable
     // from any IDL or patp.toml error name.
     for name in ["中", "错误", "エラー", "שגיאה", "Ошибка", "Ошибка2"] {
-        assert_eq!(diagnose::classify_name(name), None, "{name}");
+        assert_eq!(errors::classify_name(name), None, "{name}");
     }
     // Mixed scripts still tokenize the part we understand.
-    assert_eq!(diagnose::classify_name("中Owner"), Some(diagnose::Class::WrongOwner));
+    assert_eq!(errors::classify_name("中Owner"), Some(errors::Class::WrongOwner));
 }
 
 #[test]
 fn cpi_pda_authorities_are_not_reported_as_missing_signers() {
-    use crate::chain::solana::{Account, Node, Status};
+    use crate::app::solana::{Account, Node, Status};
 
     let spec = |name: &str| idl::AccountSpec {
         name: name.to_string(),

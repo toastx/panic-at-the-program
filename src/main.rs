@@ -1,8 +1,8 @@
 mod app;
-mod chain;
 mod suite;
 #[cfg(test)]
 mod tests;
+mod ui;
 mod workspace;
 
 use std::io;
@@ -14,9 +14,9 @@ use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::prelude::*;
 
-use app::state::{App, Mode, Screen, clusters};
-use chain::solana;
+use app::solana;
 use suite::tap as rpc_tap;
+use ui::state::{App, Mode, Screen, clusters};
 
 fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -47,7 +47,7 @@ fn main() -> io::Result<()> {
     let mut term = Terminal::new(CrosstermBackend::new(out))?;
 
     while !app.quit {
-        term.draw(|f| app::screens::draw(f, &mut app))?;
+        term.draw(|f| ui::screens::draw(f, &mut app))?;
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => on_key(&mut app, key),
             Event::Mouse(mouse) => match mouse.kind {

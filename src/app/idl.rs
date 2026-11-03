@@ -142,6 +142,12 @@ impl Flavor {
             Flavor::Codama => "codama",
         }
     }
+
+    pub fn from_label(label: &str) -> Option<Flavor> {
+        [Flavor::Anchor, Flavor::AnchorLegacy, Flavor::Shank, Flavor::Codama]
+            .into_iter()
+            .find(|flavor| flavor.label() == label)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -751,7 +757,7 @@ fn name_custom_code(failure: &mut super::diagnose::Failure, program: &str, code:
         ));
     }
     if failure.class.is_none()
-        && let Some(class) = super::diagnose::classify_name(&name)
+        && let Some(class) = super::errors::classify_name(&name)
     {
         failure.class = Some(class);
         failure.notes.push(Note::maybe(

@@ -27,6 +27,17 @@ pub fn reload() {
     CONFIG.with(|cell| *cell.borrow_mut() = None);
 }
 
+/// Stands in for patp.toml on this thread. Thread-local like the config itself,
+/// so parallel tests cannot see each other's.
+#[cfg(test)]
+pub fn use_text(text: &str) {
+    let config = Config {
+        root: PathBuf::new(),
+        sections: parse(text),
+    };
+    CONFIG.with(|cell| *cell.borrow_mut() = Some(Some(config)));
+}
+
 fn load() -> Option<Config> {
     let mut dir = std::env::current_dir().ok()?;
     loop {
