@@ -563,96 +563,42 @@ fn program_error(program: &str, code: u32) -> Option<Known> {
         .map(|known| Known { ..*known })
 }
 
-/// Runtime errors the validator reports by name rather than by code: name,
-/// message, class, and advice where the class's generic help would not fit.
-const RUNTIME_ERRORS: &[(&str, &str, Option<Class>, &str)] = &[
-    (
-        "MissingRequiredSignature",
-        "an account that must sign did not sign",
-        Some(Class::NotSigner),
-        "",
-    ),
-    (
-        "ProgramFailedToComplete",
-        "the program aborted — panic, unwrap, or compute exhaustion",
-        None,
-        "",
-    ),
-    (
-        "ComputeBudgetExceeded",
-        "the instruction ran out of compute units",
-        None,
-        "",
-    ),
-    (
-        "AccountNotRentExempt",
-        "an account was left below the rent-exempt minimum",
-        Some(Class::Rent),
-        "",
-    ),
-    (
-        "InsufficientFunds",
-        "an account does not hold enough lamports",
-        Some(Class::Insufficient),
-        "",
-    ),
-    ("InvalidAccountData", "the program rejected an account's data", None, ""),
-    (
-        "AccountDataTooSmall",
-        "the account's data is smaller than required",
-        None,
-        "",
-    ),
-    ("InvalidArgument", "the runtime rejected an argument", None, ""),
-    (
-        "AccountBorrowFailed",
-        "the program borrowed the same account twice",
-        None,
-        "",
-    ),
-    (
-        "PrivilegeEscalation",
-        "a CPI asked for more privileges than the caller had",
-        None,
-        "",
-    ),
-    (
-        "ProgramEnvironmentSetupFailure",
-        "the program could not be loaded",
-        None,
-        "",
-    ),
-    (
-        "InsufficientFundsForFee",
-        "the fee payer cannot cover the transaction fee",
-        Some(Class::Insufficient),
-        "the fee payer cannot cover the fee — fund it before retrying",
-    ),
-    (
-        "BlockhashNotFound",
-        "the blockhash expired before the transaction landed",
-        Some(Class::Expired),
-        "the blockhash expired before the transaction landed — fetch a fresh one and re-sign",
-    ),
-    (
-        "AlreadyProcessed",
-        "this exact transaction was already processed",
-        Some(Class::Already),
-        "this transaction already landed — reuse the earlier signature instead of resending",
-    ),
-];
+pub struct RuntimeError {
+    pub name: &'static str,
+    pub message: &'static str,
+    pub class: Option<Class>,
+    /// Curated advice. Empty falls back to the class's generic help.
+    pub help: &'static str,
+}
+
+const RUNTIME_TSV: &str = include_str!("runtime_errors.tsv");
+
+/// Parsed rows of [`RUNTIME_TSV`]. Public so tests can assert the file is whole.
+pub fn runtime_rows() -> impl Iterator<Item = RuntimeError> {
+    RUNTIME_TSV
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .filter_map(|line| {
+            let mut col = line.split('\t');
+            Some(RuntimeError {
+                name: col.next()?,
+                message: col.next()?,
+                class: col.next().filter(|c| !c.is_empty()).and_then(Class::from_name),
+                help: col.next().unwrap_or_default(),
+            })
+        })
+}
 
 fn runtime_error(name: &str) -> Option<(&'static str, Option<Class>, &'static str)> {
-    RUNTIME_ERRORS
-        .iter()
-        .find(|(key, ..)| *key == name)
-        .map(|&(_, message, class, help)| (message, class, help))
+    runtime_rows()
+        .find(|row| row.name == name)
+        .map(|row| (row.message, row.class, row.help))
 }
 
 // ---------------------------------------------------------------- anchor logs
 
 #[derive(Default)]
-pub struct AnchorLog {
+pub(crate) struct AnchorLog {
     pub name: Option<String>,
     pub number: Option<u32>,
     pub message: Option<String>,
@@ -668,7 +614,7 @@ fn field(line: &str, key: &str) -> Option<String> {
     Some(value[..end].trim().trim_end_matches('.').to_string())
 }
 
-pub fn anchor_log(logs: &[String]) -> AnchorLog {
+pub(crate) fn anchor_log(logs: &[String]) -> AnchorLog {
     let mut parsed = AnchorLog::default();
     let mut lines = logs
         .iter()
@@ -740,15 +686,14 @@ fn anchor_notes(anchor: &AnchorLog) -> Vec<Note> {
     if let (Some(expected), Some(actual)) = (&anchor.expected, &anchor.actual)
         && expected != actual
     {
-        out.push(Note {
-            expected: Some(expected.clone()),
-            actual: Some(actual.clone()),
-            ..Note::new(
+        out.push(
+            Note::new(
                 DiagnosticId::Log(LogId::ValueMismatch),
                 Tier::Fix,
                 "the value the program expected differs from the one passed".to_string(),
             )
-        });
+            .values(Some(expected.clone()), Some(actual.clone())),
+        );
     }
     if let Some(account) = &anchor.account {
         out.push(Note::new(
@@ -835,7 +780,7 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
 
 /// Anchor reserves codes below this for the framework; at and above it are the
 /// program's own `#[error_code]` variants.
-pub const ANCHOR_USER_OFFSET: u32 = 6000;
+const ANCHOR_USER_OFFSET: u32 = 6000;
 
 /// Notes that can only be read out of the program's logs.
 pub fn log_notes(code: &Code, logs: &[String], cu: u32, cu_limit: u32) -> Vec<Note> {
@@ -845,7 +790,7 @@ pub fn log_notes(code: &Code, logs: &[String], cu: u32, cu_limit: u32) -> Vec<No
 
     if text.contains("exceeded cus")
         || text.contains("exceeded maximum number of instructions")
-        || matches!(code, Code::Named(name) if name == "ComputeBudgetExceeded")
+        || matches!(code, Code::Named(name) if name == "ComputationalBudgetExceeded")
     {
         out.push(note(
             LogId::CuExceeded,
@@ -1030,10 +975,8 @@ pub fn add_findings(failure: &mut Failure, instruction: usize, findings: &[Findi
         } else {
             format!("{}: {}", finding.role, finding.message)
         };
-        failure.notes.push(Note {
-            expected: finding.expected.clone(),
-            actual: finding.actual.clone(),
-            ..Note::new(
+        failure.notes.push(
+            Note::new(
                 DiagnosticId::Finding {
                     kind: finding.kind,
                     instruction,
@@ -1042,7 +985,8 @@ pub fn add_findings(failure: &mut Failure, instruction: usize, findings: &[Findi
                 tier,
                 text,
             )
-        });
+            .values(finding.expected.clone(), finding.actual.clone()),
+        );
     }
 
     if corroborated {
