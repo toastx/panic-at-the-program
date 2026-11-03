@@ -6,6 +6,7 @@ use crate::app::screens;
 use crate::app::state::{self as app, App, Click, Mode, Screen};
 use crate::chain::{diagnose, idl, solana, validate};
 use crate::on_key;
+use crate::suite;
 use crate::workspace;
 use serde_json::{Value, json};
 use solana::Status;
@@ -987,6 +988,28 @@ fn heuristics_suggest_a_fix_per_failure_class() {
         0,
     );
     assert!(panic.contains("check unwraps and arithmetic"));
+
+    // Runtime names the old hand-written table missed entirely.
+    let seeds = fix(json!({"InstructionError": [0, "InvalidSeeds"]}), vec![], 0, 0);
+    assert!(seeds.contains("re-derive the PDA"), "{seeds}");
+
+    let keys = fix(json!({"InstructionError": [0, "NotEnoughAccountKeys"]}), vec![], 0, 0);
+    assert!(keys.contains("fewer accounts were passed"), "{keys}");
+
+    // The runtime calls it `Computational`, so the old table never matched it.
+    let budget = diagnose::failure(
+        &json!({"InstructionError": [0, "ComputationalBudgetExceeded"]}),
+        &nodes,
+        &[],
+        200_000,
+        200_000,
+    )
+    .unwrap();
+    assert!(
+        budget.meaning.contains("ran out of compute units"),
+        "{}",
+        budget.meaning
+    );
 }
 
 #[test]
@@ -1372,6 +1395,105 @@ fn anchor_tsv_is_wellformed() {
         diagnose::anchor_rows().find(|known| known.code == 2006).unwrap().class,
         Some(diagnose::Class::Seeds)
     );
+}
+
+#[test]
+fn build_errors_are_told_apart_from_test_failures() {
+    // rustc: the headline and the line it points at.
+    let rustc = "\
+   Compiling vault v0.1.0
+error[E0308]: mismatched types
+   --> programs/vault/src/lib.rs:42:9
+    |
+42  |         Ok(1)
+error[E0425]: cannot find value `bump`
+error: could not compile `vault` (lib) due to 2 previous errors
+";
+    let found = suite::build_error(rustc).expect("a failed build");
+    assert_eq!(found.headline, "error[E0308]: mismatched types");
+    assert_eq!(found.location.as_deref(), Some("programs/vault/src/lib.rs:42:9"));
+    assert_eq!(found.count, 2, "the cargo summary line is not an error of its own");
+
+    // tsc carries the path inside the error line, so there is no `-->`.
+    let tsc = "tests/vault.ts:12:5 - error TS2345: Argument of type 'number' is not assignable.\n";
+    let found = suite::build_error(tsc).expect("a failed ts build");
+    assert!(found.headline.contains("error TS2345"), "{}", found.headline);
+    assert_eq!(found.location, None);
+
+    // anchor's own CLI failures.
+    let anchor = "Error: Unable to read keypair file\n";
+    assert_eq!(
+        suite::build_error(anchor).map(|b| b.headline),
+        Some("Error: Unable to read keypair file".to_string())
+    );
+
+    // A suite that ran and failed is not a build error: blaming the build
+    // would point the user at the wrong file entirely.
+    let ran = "\
+running 2 tests
+test vault::withdraw_fails ... FAILED
+test result: FAILED. 1 passed; 1 failed
+error: test failed, to rerun pass `-p vault --lib`
+";
+    assert!(
+        suite::build_error(ran).is_none(),
+        "the suite ran, so this is a test failure"
+    );
+
+    let mocha = "  vault\n    ✔ initializes\n  1 passing (2s)\n  1 failing\n";
+    assert!(suite::build_error(mocha).is_none(), "mocha ran");
+
+    // A clean run with nothing to report.
+    assert!(suite::build_error("   Compiling vault v0.1.0\n    Finished\n").is_none());
+}
+
+#[test]
+fn runtime_tsv_is_wellformed() {
+    let rows: Vec<diagnose::RuntimeError> = diagnose::runtime_rows().collect();
+    assert_eq!(rows.len(), 89, "the two runtime error enums declare 89 variants");
+
+    for row in &rows {
+        assert!(!row.name.is_empty(), "a row has no name");
+        assert!(
+            !row.message.is_empty() || !row.help.is_empty(),
+            "{} says nothing at all",
+            row.name
+        );
+    }
+    let names: Vec<&str> = rows.iter().map(|row| row.name).collect();
+    let mut unique = names.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(
+        names.len(),
+        unique.len(),
+        "a name resolves to one row, so no duplicates"
+    );
+
+    // The structured codes are resolved against the program's own table, so a
+    // row for them would shadow the real diagnosis.
+    for shadow in ["Custom", "InstructionError"] {
+        assert!(!names.contains(&shadow), "{shadow} must not have a row");
+    }
+
+    // The names the code matches on by hand. A typo here is silent: the lookup
+    // just stops matching, which is how `ComputeBudgetExceeded` survived.
+    for matched in ["MissingRequiredSignature", "ComputationalBudgetExceeded"] {
+        assert!(names.contains(&matched), "{matched} is matched in code but has no row");
+    }
+
+    // One from each enum, so a half-finished regeneration is caught.
+    for name in [
+        "BlockhashNotFound",
+        "AlreadyProcessed",
+        "NotEnoughAccountKeys",
+        "InvalidSeeds",
+    ] {
+        assert!(names.contains(&name), "missing {name}");
+    }
+    let seeds = rows.iter().find(|row| row.name == "InvalidSeeds").unwrap();
+    assert_eq!(seeds.class, Some(diagnose::Class::Seeds));
+    assert!(seeds.help.contains("re-derive the PDA"));
 }
 
 #[test]
