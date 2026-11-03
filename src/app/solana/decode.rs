@@ -89,6 +89,11 @@ pub fn decode_message(bytes: &[u8]) -> Option<Message> {
             at = at.checked_add(readonly)?;
             accounts_complete = accounts_complete && writable == 0 && readonly == 0;
         }
+        // The reads above check the start of each table; this checks the end
+        // of the last one, which nothing reads past.
+        if at > bytes.len() {
+            return None;
+        }
     }
 
     Some(Message {
@@ -278,14 +283,20 @@ pub fn decode_instruction(program: &str, data: &str) -> Option<(String, Vec<(Str
         }
         "ComputeBudget111111111111111111111111111111" => {
             let name = match bytes[0] {
+                1 => "RequestHeapFrame",
                 2 => "SetComputeUnitLimit",
                 3 => "SetComputeUnitPrice",
+                4 => "SetLoadedAccountsDataSizeLimit",
                 _ => "Unknown",
             };
-            let value = bytes
-                .get(1..5)
-                .map(|v| u32::from_le_bytes(v.try_into().unwrap_or([0; 4])))
-                .unwrap_or(0);
+            // Price is micro-lamports as a u64; every other variant is a u32.
+            let value = match bytes[0] {
+                3 => u64_at(&bytes, 1),
+                _ => bytes
+                    .get(1..5)
+                    .map(|v| u64::from(u32::from_le_bytes(v.try_into().unwrap_or([0; 4]))))
+                    .unwrap_or(0),
+            };
             Some((name.to_string(), vec![("value".into(), value.to_string())]))
         }
         _ => None,

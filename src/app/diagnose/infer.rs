@@ -29,7 +29,7 @@ pub fn infer_custom(code: u32, flavor: Option<crate::app::idl::Flavor>) -> (Stri
             format!("{} programs number their errors from 0", flavor.label()),
             format!(
                 "error {code} is the {} entry of the program's error enum",
-                ordinal(code + 1)
+                ordinal(u64::from(code) + 1)
             ),
         ),
         None if code >= anchor::USER_OFFSET => (
@@ -45,7 +45,7 @@ pub fn infer_custom(code: u32, flavor: Option<crate::app::idl::Flavor>) -> (Stri
     }
 }
 
-fn ordinal(n: u32) -> String {
+fn ordinal(n: u64) -> String {
     let suffix = match (n % 10, n % 100) {
         (1, 11) | (2, 12) | (3, 13) => "th",
         (1, _) => "st",
