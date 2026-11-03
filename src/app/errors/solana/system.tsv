@@ -1,0 +1,6 @@
+# the System Program errors, by hand: code, name, message, class, help
+0	AccountAlreadyInUse	the account already exists — use a different seed or skip creation	Already	
+1	ResultWithNegativeLamports	the transfer would leave a negative balance	Insufficient	
+3	InvalidAccountDataLength	the requested data length does not match		
+4	MaxSeedLengthExceeded	a seed exceeds 32 bytes	Seeds	
+5	AddressWithSeedMismatch	the derived address does not match the account passed	Seeds	
