@@ -159,12 +159,17 @@ fn test_command(validator: &mut Option<suite::Validator>) -> io::Result<Option<A
         print!("{output}");
         // A build that fails never reaches the tests, so there is nothing to
         // diagnose for a reason the generic message would hide.
-        match suite::build_error(&output) {
-            Some(build) => {
-                let plural = if build.count == 1 { "error" } else { "errors" };
-                eprintln!("the build failed with {} {plural} — the suite never ran", build.count);
-                eprintln!("  {}", build.headline);
-                if let Some(location) = &build.location {
+        match suite::setup_error(&output) {
+            Some(setup) => {
+                match setup.stage {
+                    suite::Stage::Compile => {
+                        let plural = if setup.count == 1 { "error" } else { "errors" };
+                        eprintln!("the build failed with {} {plural} — the suite never ran", setup.count);
+                    }
+                    suite::Stage::Startup => eprintln!("the suite stopped before any test ran"),
+                }
+                eprintln!("  {}", setup.headline);
+                if let Some(location) = &setup.location {
                     eprintln!("  at {location}");
                 }
             }

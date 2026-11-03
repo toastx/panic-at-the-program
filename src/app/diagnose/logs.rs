@@ -20,22 +20,28 @@ pub fn log_notes(code: &Code, logs: &[String], cu: u32, cu_limit: u32) -> Vec<No
         ));
     }
 
+    // The System Program's transfer check: the source's balance, then the amount
+    // it tried to move. Not a rent figure — `create_account` hits the same check
+    // with the rent-exempt deposit as the amount, but a plain transfer does too.
     if let Some(line) = logs.iter().find(|line| line.contains("insufficient lamports")) {
         let numbers: Vec<u64> = line
             .split(|c: char| !c.is_ascii_digit())
             .filter_map(|part| part.parse().ok())
             .collect();
+        let sol = |lamports: u64| lamports as f64 / 1e9;
         out.push(match numbers.as_slice() {
             [have, need, ..] if need > have => note(
-                LogId::RentShortfall,
+                LogId::LamportShortfall,
                 format!(
-                    "fund the account with {:.9} more SOL to reach the rent-exempt minimum",
-                    (need - have) as f64 / 1e9
+                    "the source holds {:.9} SOL but the transfer needs {:.9} — fund it with {:.9} more SOL",
+                    sol(*have),
+                    sol(*need),
+                    sol(need - have)
                 ),
             ),
             _ => note(
-                LogId::RentShortfall,
-                "an account is below the rent-exempt minimum — fund it first".to_string(),
+                LogId::LamportShortfall,
+                "the source does not hold enough lamports for this transfer — fund it first".to_string(),
             ),
         });
     }

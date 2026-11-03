@@ -551,6 +551,10 @@ fn unknown_codes_are_inferred_from_the_idl_flavor() {
     assert!(headline.contains("program error #7"));
     assert!(hint.contains("8th entry"));
 
+    // Custom codes are u32, and the last one has no u32 successor.
+    let (_, _, hint) = diagnose::infer_custom(u32::MAX, Some(Flavor::Shank));
+    assert!(hint.contains("4294967296th entry"), "{hint}");
+
     let (headline, _, hint) = diagnose::infer_custom(3, None);
     assert!(headline.contains("custom program error 3"));
     assert!(hint.contains("number errors from 0"));
@@ -853,6 +857,14 @@ fn anchor_logs_yield_account_source_and_expected_values() {
         Some("7xKX9mPaRvQw1bNcTzWd4rYfG6hJ8uL2sE5vA3dC9kFq")
     );
 
+    // `require_eq!` on plain values logs them inline instead.
+    let inline: Vec<String> = ["Program log: Left: 5", "Program log: Right: 7"]
+        .map(String::from)
+        .to_vec();
+    let parsed = anchor::log(&inline);
+    assert_eq!(parsed.actual.as_deref(), Some("5"));
+    assert_eq!(parsed.expected.as_deref(), Some("7"));
+
     let thrown = ["Program log: AnchorError thrown in programs/vault/src/lib.rs:88. Error Code: Unauthorized. Error Number: 6000. Error Message: not the owner."]
         .map(String::from)
         .to_vec();
@@ -969,6 +981,17 @@ fn heuristics_suggest_a_fix_per_failure_class() {
     assert!(
         rent.contains("0.001148400 more SOL"),
         "shows the exact shortfall: {rent}"
+    );
+    assert!(
+        rent.contains("holds 0.000890880 SOL but the transfer needs 0.002039280"),
+        "names both sides of the transfer: {rent}"
+    );
+    // The error here is the token program's NotRentExempt, so rent advice from
+    // its table is right; the transfer note alone must not claim rent.
+    let shortfall = rent.split(" | ").find(|note| note.contains("transfer needs")).unwrap();
+    assert!(
+        !shortfall.contains("rent"),
+        "a transfer shortfall is not a rent figure: {shortfall}"
     );
 
     let in_use = fix(
@@ -1227,6 +1250,20 @@ fn instruction_data_is_shown_parsed_and_raw() {
     assert_eq!(name, "Transfer");
     assert_eq!(fields[1], ("amount".to_string(), "1000000".to_string()));
     assert_eq!(solana::bs58_decode(&transfer), vec![3, 64, 66, 15, 0, 0, 0, 0, 0]);
+
+    // SetComputeUnitPrice is a u64 of micro-lamports; the limit is a u32.
+    let budget = "ComputeBudget111111111111111111111111111111";
+    let mut price = vec![3];
+    price.extend(5_000_000_000u64.to_le_bytes());
+    let (name, fields) = solana::decode_instruction(budget, &solana::bs58_encode(&price)).unwrap();
+    assert_eq!(name, "SetComputeUnitPrice");
+    assert_eq!(fields[0].1, "5000000000", "above u32::MAX");
+
+    let mut limit = vec![2];
+    limit.extend(1_400_000u32.to_le_bytes());
+    let (name, fields) = solana::decode_instruction(budget, &solana::bs58_encode(&limit)).unwrap();
+    assert_eq!(name, "SetComputeUnitLimit");
+    assert_eq!(fields[0].1, "1400000");
 }
 
 #[test]
@@ -1287,6 +1324,14 @@ fn a_serialized_transaction_decodes_into_accounts_and_instructions() {
     let message = solana::decode_message(&v0).expect("decoded");
     assert!(!message.accounts_complete, "a loaded address we cannot see");
     assert_eq!(message.json["accountKeys"].as_array().map(Vec::len), Some(2));
+
+    // The same message claiming two readonly indexes it does not carry.
+    let mut truncated = v0.clone();
+    *truncated.last_mut().unwrap() = 2;
+    assert!(
+        solana::decode_message(&truncated).is_none(),
+        "the last table runs past the end"
+    );
 
     assert!(solana::decode_message(b"nowhere near a transaction").is_none());
 }
@@ -1423,7 +1468,7 @@ fn anchor_tsv_is_wellformed() {
 }
 
 #[test]
-fn build_errors_are_told_apart_from_test_failures() {
+fn setup_errors_are_told_apart_from_test_failures() {
     // rustc: the headline and the line it points at.
     let rustc = "\
    Compiling vault v0.1.0
@@ -1434,23 +1479,33 @@ error[E0308]: mismatched types
 error[E0425]: cannot find value `bump`
 error: could not compile `vault` (lib) due to 2 previous errors
 ";
-    let found = suite::build_error(rustc).expect("a failed build");
+    let found = suite::setup_error(rustc).expect("a failed build");
     assert_eq!(found.headline, "error[E0308]: mismatched types");
     assert_eq!(found.location.as_deref(), Some("programs/vault/src/lib.rs:42:9"));
+    assert_eq!(found.stage, suite::Stage::Compile);
     assert_eq!(found.count, 2, "the cargo summary line is not an error of its own");
+
+    // rustc's parse errors have no code, and its own summary is not an error.
+    let syntax =
+        "error: expected expression, found `)`\n  --> src/lib.rs:7:14\nerror: aborting due to 1 previous error\n";
+    let found = suite::setup_error(syntax).expect("a syntax error is a failed build");
+    assert_eq!(found.headline, "error: expected expression, found `)`");
+    assert_eq!(found.location.as_deref(), Some("src/lib.rs:7:14"));
+    assert_eq!(found.count, 1);
 
     // tsc carries the path inside the error line, so there is no `-->`.
     let tsc = "tests/vault.ts:12:5 - error TS2345: Argument of type 'number' is not assignable.\n";
-    let found = suite::build_error(tsc).expect("a failed ts build");
+    let found = suite::setup_error(tsc).expect("a failed ts build");
     assert!(found.headline.contains("error TS2345"), "{}", found.headline);
     assert_eq!(found.location, None);
 
-    // anchor's own CLI failures.
-    let anchor = "Error: Unable to read keypair file\n";
-    assert_eq!(
-        suite::build_error(anchor).map(|b| b.headline),
-        Some("Error: Unable to read keypair file".to_string())
-    );
+    // anchor's own CLI failures, and exceptions thrown while the tests load:
+    // the suite never ran, but nothing failed to compile.
+    let anchor = suite::setup_error("Error: Unable to read keypair file\n").expect("anchor stopped");
+    assert_eq!(anchor.headline, "Error: Unable to read keypair file");
+    assert_eq!(anchor.stage, suite::Stage::Startup);
+    let thrown = "Error: Account does not exist\n    at Object.<anonymous> (tests/vault.ts:9:11)\n";
+    assert_eq!(suite::setup_error(thrown).map(|e| e.stage), Some(suite::Stage::Startup));
 
     // A suite that ran and failed is not a build error: blaming the build
     // would point the user at the wrong file entirely.
@@ -1461,15 +1516,15 @@ test result: FAILED. 1 passed; 1 failed
 error: test failed, to rerun pass `-p vault --lib`
 ";
     assert!(
-        suite::build_error(ran).is_none(),
+        suite::setup_error(ran).is_none(),
         "the suite ran, so this is a test failure"
     );
 
     let mocha = "  vault\n    ✔ initializes\n  1 passing (2s)\n  1 failing\n";
-    assert!(suite::build_error(mocha).is_none(), "mocha ran");
+    assert!(suite::setup_error(mocha).is_none(), "mocha ran");
 
     // A clean run with nothing to report.
-    assert!(suite::build_error("   Compiling vault v0.1.0\n    Finished\n").is_none());
+    assert!(suite::setup_error("   Compiling vault v0.1.0\n    Finished\n").is_none());
 }
 
 #[test]
@@ -1764,8 +1819,8 @@ fn the_diagnosis_renders_in_a_fixed_order() {
     assert_eq!(
         order,
         vec![
+            "Help/Certain/lamports.shortfall".to_string(),
             "Help/Certain/program.panic".to_string(),
-            "Help/Certain/rent.shortfall".to_string(),
         ],
         "tier then id, independent of which branch pushed first"
     );

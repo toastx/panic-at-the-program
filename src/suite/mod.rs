@@ -196,33 +196,47 @@ fn wallet(root: &Path) -> Option<String> {
     plausible.then_some(address)
 }
 
-// ---------------------------------------------------------------- build errors
+// ---------------------------------------------------------------- setup errors
 
-/// A compile error from the suite's own build.
-pub struct BuildError {
-    /// The compiler's first error line, verbatim.
+/// What stopped the suite before any test ran.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Stage {
+    /// rustc or tsc refused to build.
+    Compile,
+    /// The process died first: anchor's own CLI, or an exception thrown while
+    /// the tests were loading. Both print `Error: ..`, and neither is a build.
+    Startup,
+}
+
+/// The first error from a suite that stopped before running any test.
+pub struct SetupError {
+    pub stage: Stage,
+    /// The first error line, verbatim.
     pub headline: String,
     /// The `-->` line rustc points with, when it printed one.
     pub location: Option<String>,
-    /// How many error lines the build printed, not just the first.
+    /// How many errors of that stage were printed, not just the first.
     pub count: usize,
 }
 
-/// The first compile error in the suite's output.
+/// Why the suite never ran a test, if that is what happened.
 ///
 /// Only meaningful when the suite produced no transactions: a build that fails
 /// never reaches the tests, so "no failed transaction" is the wrong thing to
 /// tell the user — the error they need is further up their scrollback.
-pub fn build_error(output: &str) -> Option<BuildError> {
+pub fn setup_error(output: &str) -> Option<SetupError> {
     // The suite ran, so any `error:` lines after this are its own assertions
     // failing, not the build refusing to produce a binary.
     if output.contains("test result:") || output.contains(" passing") {
         return None;
     }
     let lines: Vec<&str> = output.lines().map(str::trim_end).collect();
-    let errors: Vec<usize> = (0..lines.len()).filter(|&i| is_build_error(lines[i])).collect();
-    let &first = errors.first()?;
-    Some(BuildError {
+    let (first, stage) = lines
+        .iter()
+        .enumerate()
+        .find_map(|(i, line)| Some((i, stage_of(line)?)))?;
+    Some(SetupError {
+        stage,
         headline: lines[first].trim().to_string(),
         // rustc puts the path on the next line; tsc puts it in the error line.
         location: lines
@@ -230,19 +244,27 @@ pub fn build_error(output: &str) -> Option<BuildError> {
             .map(|line| line.trim())
             .filter(|line| line.starts_with("--> "))
             .map(|line| line.trim_start_matches("--> ").to_string()),
-        count: errors.len(),
+        count: lines.iter().filter(|line| stage_of(line) == Some(stage)).count(),
     })
 }
 
-/// Whether a line is a compiler refusing to build, as opposed to a test
-/// reporting a failure. Kept narrow on purpose: a false positive would blame
-/// the build for a problem that is really in the program.
-fn is_build_error(line: &str) -> bool {
+/// Which stage a line reports an error from, if any. Kept narrow on purpose:
+/// a false positive would blame the build for a problem in the program.
+fn stage_of(line: &str) -> Option<Stage> {
     let line = line.trim();
-    // `error[E0308]: ..` from rustc, `error TS2345: ..` from tsc, and anchor's
-    // own `Error: ..`. Cargo's bare `error: could not compile ..` is a summary
-    // of errors already listed, so it is not a headline worth showing.
-    line.starts_with("error[E") || line.contains(" - error TS") || line.starts_with("Error: ")
+    if line.starts_with("error[E") || line.contains(" - error TS") {
+        return Some(Stage::Compile);
+    }
+    // rustc's parse errors carry no code: `error: expected expression`. Cargo
+    // and rustc also print bare summaries of the errors already listed, which
+    // are not errors of their own.
+    if let Some(rest) = line.strip_prefix("error: ") {
+        let summary = ["could not compile", "aborting due to", "test failed"]
+            .iter()
+            .any(|prefix| rest.starts_with(prefix));
+        return (!summary).then_some(Stage::Compile);
+    }
+    line.starts_with("Error: ").then_some(Stage::Startup)
 }
 
 pub fn failed_signatures(output: &str, cluster: &str) -> Vec<String> {

@@ -14,6 +14,17 @@ pub struct Log {
     pub actual: Option<String>,
 }
 
+/// One side of a failed comparison. Anchor logs a plain value inline,
+/// `Left: 5`, but a pubkey on the line after a bare `Left:`.
+fn compared(inline: &str, next: Option<&&str>) -> Option<String> {
+    let inline = inline.trim();
+    if inline.is_empty() {
+        next.map(|next| next.trim().to_string())
+    } else {
+        Some(inline.to_string())
+    }
+}
+
 fn field(line: &str, key: &str) -> Option<String> {
     let value = &line[line.find(key)? + key.len()..];
     let end = value.find(". ").unwrap_or(value.len());
@@ -43,12 +54,12 @@ pub fn log(logs: &[String]) -> Log {
             parsed.message = field(rest, "Error Message: ").or(parsed.message);
             continue;
         }
-        if line.starts_with("Left:") {
-            parsed.actual = lines.peek().map(|next| next.trim().to_string());
+        if let Some(inline) = line.strip_prefix("Left:") {
+            parsed.actual = compared(inline, lines.peek());
             continue;
         }
-        if line.starts_with("Right:") {
-            parsed.expected = lines.peek().map(|next| next.trim().to_string());
+        if let Some(inline) = line.strip_prefix("Right:") {
+            parsed.expected = compared(inline, lines.peek());
             continue;
         }
         if let Some(message) = line.strip_prefix("Error: ") {
