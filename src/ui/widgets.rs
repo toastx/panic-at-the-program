@@ -1,36 +1,151 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::state::{App, Click, clusters};
 use crate::app::solana::{Kind, Node, Status, Tx};
 
-pub const ACCENT: Color = Color::Rgb(139, 122, 255);
-pub const OK: Color = Color::Rgb(74, 222, 128);
-pub const BAD: Color = Color::Rgb(248, 113, 113);
-pub const MUTED: Color = Color::Rgb(110, 114, 140);
-pub const PANEL: Color = Color::Rgb(58, 60, 82);
+/// Semantic colour slots; every UI colour comes from the active theme.
+pub struct Theme {
+    pub name: &'static str,
+    /// Reset = leave the terminal's own background and text colour alone.
+    pub bg: Color,
+    pub text: Color,
+    pub strong: Color,
+    pub dim: Color,
+    pub muted: Color,
+    pub panel: Color,
+    pub accent: Color,
+    pub ok: Color,
+    pub bad: Color,
+    pub bad_soft: Color,
+    pub bad_dim: Color,
+    pub bad_bg: Color,
+    pub info: Color,
+    pub warn: Color,
+    pub surface: Color,
+    pub select: Color,
+    pub highlight: Color,
+}
+
+const fn rgb(r: u8, g: u8, b: u8) -> Color {
+    Color::Rgb(r, g, b)
+}
+
+pub const THEMES: [Theme; 3] = [
+    Theme {
+        name: "dark",
+        bg: Color::Reset,
+        text: Color::Reset,
+        strong: Color::White,
+        dim: rgb(176, 180, 210),
+        muted: rgb(110, 114, 140),
+        panel: rgb(58, 60, 82),
+        accent: rgb(139, 122, 255),
+        ok: rgb(74, 222, 128),
+        bad: rgb(248, 113, 113),
+        bad_soft: rgb(233, 164, 170),
+        bad_dim: rgb(128, 72, 78),
+        bad_bg: rgb(58, 26, 32),
+        info: rgb(96, 165, 250),
+        warn: rgb(234, 179, 8),
+        surface: rgb(32, 33, 48),
+        select: rgb(38, 38, 58),
+        highlight: rgb(48, 48, 72),
+    },
+    Theme {
+        name: "light",
+        bg: rgb(250, 250, 252),
+        text: rgb(30, 32, 44),
+        strong: rgb(12, 12, 20),
+        dim: rgb(70, 74, 96),
+        muted: rgb(120, 124, 145),
+        panel: rgb(200, 203, 218),
+        accent: rgb(98, 78, 230),
+        ok: rgb(22, 140, 70),
+        bad: rgb(205, 45, 55),
+        bad_soft: rgb(175, 60, 72),
+        bad_dim: rgb(215, 150, 155),
+        bad_bg: rgb(253, 226, 228),
+        info: rgb(37, 99, 200),
+        warn: rgb(176, 115, 0),
+        surface: rgb(234, 235, 243),
+        select: rgb(224, 224, 240),
+        highlight: rgb(212, 212, 234),
+    },
+    // Greyscale: state reads from glyphs (✓ ✕ ↯ ⚠) and brightness, not hue.
+    Theme {
+        name: "mono",
+        bg: Color::Reset,
+        text: Color::Reset,
+        strong: rgb(245, 245, 245),
+        dim: rgb(180, 180, 180),
+        muted: rgb(120, 120, 120),
+        panel: rgb(70, 70, 70),
+        accent: rgb(225, 225, 225),
+        ok: rgb(160, 160, 160),
+        bad: rgb(255, 255, 255),
+        bad_soft: rgb(215, 215, 215),
+        bad_dim: rgb(105, 105, 105),
+        bad_bg: rgb(60, 60, 60),
+        info: rgb(190, 190, 190),
+        warn: rgb(230, 230, 230),
+        surface: rgb(36, 36, 36),
+        select: rgb(50, 50, 50),
+        highlight: rgb(66, 66, 66),
+    },
+];
+
+// Global rather than threaded through every render fn: there is one terminal.
+static THEME: AtomicUsize = AtomicUsize::new(0);
+
+pub fn theme() -> &'static Theme {
+    &THEMES[THEME.load(Ordering::Relaxed) % THEMES.len()]
+}
+
+/// Applies the theme saved in the global config, if any.
+pub fn load_theme() {
+    let saved = crate::workspace::global("ui").into_iter().find(|(key, _)| key == "theme");
+    if let Some(index) = saved.and_then(|(_, name)| THEMES.iter().position(|t| t.name == name)) {
+        THEME.store(index, Ordering::Relaxed);
+    }
+}
+
+/// Switches to the next theme and remembers it.
+pub fn cycle_theme() -> std::io::Result<()> {
+    let next = (THEME.load(Ordering::Relaxed) + 1) % THEMES.len();
+    THEME.store(next, Ordering::Relaxed);
+    crate::workspace::set_global("ui", "theme", THEMES[next].name)
+}
+
+/// Base style for a themed surface: paints the background behind content.
+pub fn base() -> Style {
+    Style::new().bg(theme().bg).fg(theme().text)
+}
 
 pub fn muted() -> Style {
-    Style::new().fg(MUTED)
+    Style::new().fg(theme().muted)
 }
 
 pub fn panel(title: &str, focused: bool) -> Block<'_> {
     let block = Block::new()
+        .style(base())
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(if focused { ACCENT } else { PANEL }));
+        .border_style(Style::new().fg(if focused { theme().accent } else { theme().panel }));
     if title.is_empty() {
         return block;
     }
     block.title(Span::styled(
         format!(" {title} "),
-        Style::new().fg(if focused { ACCENT } else { MUTED }).bold(),
+        Style::new().fg(if focused { theme().accent } else { theme().muted }).bold(),
     ))
 }
 
 pub fn chip(text: &str, color: Color) -> Span<'static> {
     Span::styled(
         format!(" {text} "),
-        Style::new().fg(color).bg(Color::Rgb(32, 33, 48)).bold(),
+        Style::new().fg(color).bg(theme().surface).bold(),
     )
 }
 
@@ -59,8 +174,8 @@ pub fn thousands(n: u64) -> String {
 
 pub fn status_color(status: Status) -> Color {
     match status {
-        Status::Ok => OK,
-        Status::Failed => BAD,
+        Status::Ok => theme().ok,
+        Status::Failed => theme().bad,
     }
 }
 
@@ -70,7 +185,7 @@ pub fn bar(cells: f64, width: usize, color: Color) -> Vec<Span<'static>> {
     let rest = width - solid.chars().count();
     vec![
         Span::styled(solid, Style::new().fg(color)),
-        Span::styled("░".repeat(rest), Style::new().fg(PANEL)),
+        Span::styled("░".repeat(rest), Style::new().fg(theme().panel)),
     ]
 }
 
@@ -92,11 +207,11 @@ pub fn delta_bar(ratio: f64, width: usize) -> Vec<Span<'static>> {
         let n = (cells.ceil() as usize).min(half);
         vec![
             Span::raw(" ".repeat(half - n)),
-            Span::styled("█".repeat(n), Style::new().fg(BAD)),
+            Span::styled("█".repeat(n), Style::new().fg(theme().bad)),
             axis,
         ]
     } else {
-        vec![Span::raw(" ".repeat(half)), axis, Span::styled(smooth(cells), Style::new().fg(OK))]
+        vec![Span::raw(" ".repeat(half)), axis, Span::styled(smooth(cells), Style::new().fg(theme().ok))]
     }
 }
 
@@ -124,7 +239,7 @@ pub fn tree_prefixes(nodes: &[Node]) -> Vec<String> {
 
 pub fn render_topbar(f: &mut Frame, area: Rect, app: &mut App) {
     let mut spans = vec![
-        Span::styled(" PANIC ", Style::new().fg(ACCENT).bold()),
+        Span::styled(" PANIC ", Style::new().fg(theme().accent).bold()),
         Span::styled("│", muted()),
     ];
 
@@ -133,7 +248,7 @@ pub fn render_topbar(f: &mut Frame, area: Rect, app: &mut App) {
     let width = label.chars().count() as u16;
     spans.push(Span::styled(
         label,
-        Style::new().fg(OK).bg(Color::Rgb(32, 33, 48)).bold(),
+        Style::new().fg(theme().ok).bg(theme().surface).bold(),
     ));
     app.cluster_button = Rect {
         x,
@@ -168,14 +283,14 @@ pub fn render_topbar(f: &mut Frame, area: Rect, app: &mut App) {
                     pct * 100.0
                 )),
             ]);
-            spans.extend(bar(pct * 10.0 * app.load_anim(), 10, ACCENT));
+            spans.extend(bar(pct * 10.0 * app.load_anim(), 10, theme().accent));
         }
         (Kind::Account, _, Some(account)) => {
             spans.extend([
                 Span::raw(format!(" {} ", short(&account.key))),
                 chip(
                     if account.executable { "program" } else { "account" },
-                    Color::Rgb(96, 165, 250),
+                    theme().info,
                 ),
                 Span::styled("  Balance ", muted()),
                 Span::raw(format!("{:.9} SOL", account.lamports as f64 / 1e9)),
@@ -203,7 +318,7 @@ pub fn render_topbar(f: &mut Frame, area: Rect, app: &mut App) {
         f.render_widget(
             Paragraph::new(Span::styled(
                 button,
-                Style::new().fg(ACCENT).bg(Color::Rgb(32, 33, 48)).bold(),
+                Style::new().fg(theme().accent).bg(theme().surface).bold(),
             )),
             button_area,
         );
@@ -241,11 +356,11 @@ pub fn render_cluster_menu(f: &mut Frame, app: &mut App) {
             let selected = i == app.cluster_index;
             let active = app.cluster == *cluster;
             Line::from(vec![
-                Span::styled(if active { " ● " } else { "   " }, Style::new().fg(OK)),
+                Span::styled(if active { " ● " } else { "   " }, Style::new().fg(theme().ok)),
                 Span::styled(
                     format!("{cluster:<11}"),
                     if selected {
-                        Style::new().fg(ACCENT).bg(Color::Rgb(38, 38, 58)).bold()
+                        Style::new().fg(theme().accent).bg(theme().select).bold()
                     } else {
                         Style::new()
                     },
@@ -277,7 +392,7 @@ fn nav_help(f: &mut Frame, area: Rect, keys: &[(&str, &str)]) {
             keys.iter()
                 .map(|(k, v)| {
                     Line::from(vec![
-                        Span::styled(format!("{k:>5} "), Style::new().fg(ACCENT)),
+                        Span::styled(format!("{k:>5} "), Style::new().fg(theme().accent)),
                         Span::styled(*v, muted()),
                     ])
                 })
@@ -309,8 +424,8 @@ pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|entry| {
             let (tag, color) = match entry.kind {
-                Kind::Tx => ("tx:", Color::Rgb(96, 165, 250)),
-                Kind::Account => ("acc:", ACCENT),
+                Kind::Tx => ("tx:", theme().info),
+                Kind::Account => ("acc:", theme().accent),
             };
             ListItem::new(Line::from(vec![
                 Span::styled(
@@ -319,7 +434,7 @@ pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
                         Some(Status::Failed) => "✕ ",
                         None => "· ",
                     },
-                    Style::new().fg(entry.status.map_or(MUTED, status_color)),
+                    Style::new().fg(entry.status.map_or(theme().muted, status_color)),
                 ),
                 Span::styled(tag, Style::new().fg(color)),
                 Span::raw(short(&entry.key)),
@@ -342,7 +457,7 @@ pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
     let mut state = ListState::default().with_selected(Some(app.entry_index));
     f.render_stateful_widget(
         List::new(items).highlight_style(if app.focus_nav {
-            Style::new().bg(Color::Rgb(38, 38, 58)).bold()
+            Style::new().bg(theme().select).bold()
         } else {
             Style::new().bold()
         }),
@@ -390,17 +505,17 @@ pub fn render_compute_chart(f: &mut Frame, area: Rect, tx: &Tx, selected: usize,
     for (i, node) in tx.nodes.iter().enumerate().take(rows) {
         let label = format!("{}. {}", node.path, node.label);
         let color = if i == selected {
-            ACCENT
+            theme().accent
         } else if node.status == Status::Failed {
-            BAD
+            theme().bad
         } else {
-            Color::Rgb(96, 165, 250)
+            theme().info
         };
         let cells = node.self_cu as f64 * bar_width as f64 / max as f64 * progress;
         let mut spans = vec![Span::styled(
             format!("{label:<label_width$.label_width$}"),
             if i == selected {
-                Style::new().fg(ACCENT).bold()
+                Style::new().fg(theme().accent).bold()
             } else {
                 Style::new()
             },
@@ -436,7 +551,7 @@ pub fn render_compute_chart(f: &mut Frame, area: Rect, tx: &Tx, selected: usize,
                 thousands(tx.cu as u64),
                 thousands(tx.cu_limit as u64)
             ),
-            Style::new().fg(ACCENT).bold(),
+            Style::new().fg(theme().accent).bold(),
         ),
     ]));
 

@@ -41,6 +41,7 @@ fn main() -> io::Result<()> {
         app
     };
 
+    ui::widgets::load_theme();
     enable_raw_mode()?;
     let mut out = io::stdout();
     execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
@@ -361,6 +362,11 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
         KeyCode::Tab => app.focus_nav = !app.focus_nav,
         KeyCode::BackTab => app.cycle_screen(-1),
         KeyCode::Char('x') => app.open_in_explorer(),
+        KeyCode::Char('t') => {
+            if let Err(err) = ui::widgets::cycle_theme() {
+                app.message = format!("theme not saved: {err}");
+            }
+        }
         KeyCode::Char('c') => app.toggle_cluster_menu(),
         KeyCode::Char(']') => app.step_cluster(1),
         KeyCode::Char('[') => app.step_cluster(-1),

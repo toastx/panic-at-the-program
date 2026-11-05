@@ -8,6 +8,7 @@ use crate::app::solana::{Status, Tx};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     app.hits.clear();
+    f.render_widget(Block::new().style(base()), f.area());
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(5), Constraint::Length(1)]).split(f.area());
     render_topbar(f, rows[0], app);
 
@@ -56,22 +57,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 fn footer(f: &mut Frame, area: Rect, app: &App) {
     let line = match &app.mode {
         Mode::Search => Line::from(vec![
-            Span::styled(" /", Style::new().fg(ACCENT).bold()),
+            Span::styled(" /", Style::new().fg(theme().accent).bold()),
             Span::raw(app.search.clone()),
-            Span::styled("▏", Style::new().fg(ACCENT)),
+            Span::styled("▏", Style::new().fg(theme().accent)),
             Span::styled(
                 format!("  {} match(es)  Enter keep · Esc clear", app.match_count()),
                 muted(),
             ),
         ]),
         Mode::Open(input) => Line::from(vec![
-            Span::styled(" signature › ", Style::new().fg(ACCENT).bold()),
+            Span::styled(" signature › ", Style::new().fg(theme().accent).bold()),
             Span::raw(input.clone()),
-            Span::styled("▏", Style::new().fg(ACCENT)),
+            Span::styled("▏", Style::new().fg(theme().accent)),
         ]),
-        _ if !app.message.is_empty() => Line::styled(format!(" {}", app.message), Style::new().fg(BAD)),
+        _ if !app.message.is_empty() => Line::styled(format!(" {}", app.message), Style::new().fg(theme().bad)),
         _ if !app.search.is_empty() => Line::from(vec![
-            Span::styled(" filter ", Style::new().fg(ACCENT).bold()),
+            Span::styled(" filter ", Style::new().fg(theme().accent).bold()),
             Span::raw(app.search.clone()),
             Span::styled(
                 format!("  {} match(es)   n next · Esc clear", app.match_count()),
@@ -79,11 +80,11 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
             ),
         ]),
         _ => Line::from(vec![
-            Span::styled(" ↑↓", Style::new().fg(ACCENT)),
+            Span::styled(" ↑↓", Style::new().fg(theme().accent)),
             Span::styled(" navigate  ", muted()),
-            Span::styled("←→", Style::new().fg(ACCENT)),
+            Span::styled("←→", Style::new().fg(theme().accent)),
             Span::styled(" collapse  ", muted()),
-            Span::styled("Enter", Style::new().fg(ACCENT)),
+            Span::styled("Enter", Style::new().fg(theme().accent)),
             Span::styled(
                 match (app.focus_nav, app.screen) {
                     (true, _) => " open  ",
@@ -94,15 +95,15 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
                 },
                 muted(),
             ),
-            Span::styled("Esc/b", Style::new().fg(ACCENT)),
+            Span::styled("Esc/b", Style::new().fg(theme().accent)),
             Span::styled(" back  ", muted()),
-            Span::styled("[ ]", Style::new().fg(ACCENT)),
+            Span::styled("[ ]", Style::new().fg(theme().accent)),
             Span::styled(" network  ", muted()),
-            Span::styled("/", Style::new().fg(ACCENT)),
+            Span::styled("/", Style::new().fg(theme().accent)),
             Span::styled(" search  ", muted()),
-            Span::styled("o", Style::new().fg(ACCENT)),
+            Span::styled("o", Style::new().fg(theme().accent)),
             Span::styled(" load  ", muted()),
-            Span::styled("q", Style::new().fg(ACCENT)),
+            Span::styled("q", Style::new().fg(theme().accent)),
             Span::styled(" quit", muted()),
         ]),
     };
@@ -231,7 +232,7 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
         f.render_widget(block, *area);
         f.render_widget(
             Paragraph::new(vec![
-                Line::styled(value, Style::new().fg(ACCENT).bold()),
+                Line::styled(value, Style::new().fg(theme().accent).bold()),
                 Line::styled(label, muted()),
             ]),
             inner,
@@ -240,7 +241,7 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
 
     if let Some((paragraph, _)) = diag {
         let block = panel("DIAGNOSIS", false)
-            .border_style(Style::new().fg(BAD))
+            .border_style(Style::new().fg(theme().bad))
             .padding(Padding::horizontal(1));
         let inner = block.inner(rows[2]);
         f.render_widget(block, rows[2]);
@@ -267,7 +268,7 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
                 Span::raw(format!("{:>16.6}", change.after)),
                 Span::styled(
                     format!("{delta:>+16.6}"),
-                    Style::new().fg(if delta < 0.0 { BAD } else { OK }).bold(),
+                    Style::new().fg(if delta < 0.0 { theme().bad } else { theme().ok }).bold(),
                 ),
             ])
         }));
@@ -313,21 +314,21 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
                 _ => "  ",
             };
             let (glyph, glyph_color) = match (is_failure, on_path, node.status) {
-                (true, _, _) => ("✕", BAD),
-                (_, true, _) => ("↯", BAD),
-                (_, _, Status::Ok) => ("✓", OK),
-                _ => ("✕", BAD),
+                (true, _, _) => ("✕", theme().bad),
+                (_, true, _) => ("↯", theme().bad),
+                (_, _, Status::Ok) => ("✓", theme().ok),
+                _ => ("✕", theme().bad),
             };
             let connector_style = if on_path {
-                Style::new().fg(if tracing { BAD } else { Color::Rgb(128, 72, 78) })
+                Style::new().fg(if tracing { theme().bad } else { theme().bad_dim })
             } else {
-                Style::new().fg(PANEL)
+                Style::new().fg(theme().panel)
             };
             let label_style = match (is_failure, on_path, node.depth) {
-                (true, _, _) => Style::new().fg(BAD).bold(),
-                (_, true, _) => Style::new().fg(Color::Rgb(233, 164, 170)).bold(),
-                (_, _, 0) => Style::new().fg(Color::White).bold(),
-                _ => Style::new().fg(Color::Rgb(176, 180, 210)),
+                (true, _, _) => Style::new().fg(theme().bad).bold(),
+                (_, true, _) => Style::new().fg(theme().bad_soft).bold(),
+                (_, _, 0) => Style::new().fg(theme().strong).bold(),
+                _ => Style::new().fg(theme().dim),
             };
             let mut spans: Vec<Span> = vec![
                 Span::styled(format!("{:>5} ", node.path), muted()),
@@ -343,9 +344,9 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
             spans.push(Span::styled(
                 format!("  {} CU", thousands(node.self_cu as u64)),
                 Style::new().fg(if node.self_cu > 0 {
-                    Color::Rgb(96, 165, 250)
+                    theme().info
                 } else {
-                    MUTED
+                    theme().muted
                 }),
             ));
             if is_failure {
@@ -356,20 +357,20 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
                     .map(Failure::label)
                     .or_else(|| node.error.clone());
                 if let Some(message) = message {
-                    spans.push(Span::styled(format!("  ⚠ {message}"), Style::new().fg(BAD).bold()));
+                    spans.push(Span::styled(format!("  ⚠ {message}"), Style::new().fg(theme().bad).bold()));
                 }
             } else if on_path {
-                spans.push(Span::styled("  propagated", Style::new().fg(Color::Rgb(128, 72, 78))));
+                spans.push(Span::styled("  propagated", Style::new().fg(theme().bad_dim)));
             }
             if faded || (tracing && !on_path) {
                 spans = spans
                     .into_iter()
-                    .map(|span| Span::styled(span.content, Style::new().fg(PANEL)))
+                    .map(|span| Span::styled(span.content, Style::new().fg(theme().panel)))
                     .collect();
             }
             let item = ListItem::new(Line::from(spans));
             if is_failure {
-                item.style(Style::new().bg(Color::Rgb(58, 26, 32)))
+                item.style(Style::new().bg(theme().bad_bg))
             } else {
                 item
             }
@@ -382,7 +383,7 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
     let mut state = app.list;
     state.select(Some(selected_index.min(visible.len().saturating_sub(1))));
     f.render_stateful_widget(
-        List::new(items).highlight_style(Style::new().bg(Color::Rgb(48, 48, 72))),
+        List::new(items).highlight_style(Style::new().bg(theme().highlight)),
         inner,
         &mut state,
     );
@@ -411,7 +412,7 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
 
     let title = format!("INSTRUCTION {}", node.path);
     let block = panel(&title, !app.focus_nav)
-        .border_style(Style::new().fg(if failed { BAD } else { PANEL }))
+        .border_style(Style::new().fg(if failed { theme().bad } else { theme().panel }))
         .padding(Padding::symmetric(2, 1));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -437,7 +438,7 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(node_label(node), Style::new().fg(Color::White).bold()),
+            Span::styled(node_label(node), Style::new().fg(theme().strong).bold()),
             Span::styled(
                 format!("   {} inner call(s)   depth {}", node.children, node.depth),
                 muted(),
@@ -454,9 +455,9 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
             Span::styled(
                 call_path(tx, index).join("  →  "),
                 Style::new().fg(if path.contains(&index) {
-                    BAD
+                    theme().bad
                 } else {
-                    Color::Rgb(176, 180, 210)
+                    theme().dim
                 }),
             ),
         ]),
@@ -464,12 +465,12 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
             Span::styled("Compute     ", muted()),
             Span::styled(
                 format!("{:>9}", thousands(node.self_cu as u64)),
-                Style::new().fg(ACCENT).bold(),
+                Style::new().fg(theme().accent).bold(),
             ),
             Span::styled(" self", muted()),
             Span::styled(
                 format!("{:>12}", thousands(node.cu as u64)),
-                Style::new().fg(Color::Rgb(176, 180, 210)),
+                Style::new().fg(theme().dim),
             ),
             Span::styled(" inclusive", muted()),
             Span::styled(
@@ -497,28 +498,28 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
     if let Some(decoded) = &decoded {
         facts.push(Line::from(vec![
             Span::styled("Data        ", muted()),
-            Span::styled(decoded.name.clone(), Style::new().fg(Color::Rgb(96, 165, 250)).bold()),
+            Span::styled(decoded.name.clone(), Style::new().fg(theme().info).bold()),
             Span::styled(
                 decoded
                     .args
                     .iter()
                     .map(|(k, v)| format!("   {k} {}", short(v)))
                     .collect::<String>(),
-                Style::new().fg(Color::Rgb(176, 180, 210)),
+                Style::new().fg(theme().dim),
             ),
         ]));
     } else {
         match crate::app::solana::decode_instruction(&node.program, &node.data) {
             Some((name, fields)) => facts.push(Line::from(vec![
                 Span::styled("Data        ", muted()),
-                Span::styled(name, Style::new().fg(Color::Rgb(96, 165, 250)).bold()),
+                Span::styled(name, Style::new().fg(theme().info).bold()),
                 Span::styled(
                     fields
                         .iter()
                         .skip(1)
                         .map(|(k, v)| format!("   {k} {v}"))
                         .collect::<String>(),
-                    Style::new().fg(Color::Rgb(176, 180, 210)),
+                    Style::new().fg(theme().dim),
                 ),
             ])),
             None if !node.data.is_empty() => facts.push(Line::from(vec![
@@ -536,8 +537,8 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
             let error = node.error.clone().or_else(|| tx.error.clone()).unwrap_or_default();
             f.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled("⚠  ", Style::new().fg(BAD).bold()),
-                    Span::styled(error, Style::new().fg(BAD).bold()),
+                    Span::styled("⚠  ", Style::new().fg(theme().bad).bold()),
+                    Span::styled(error, Style::new().fg(theme().bad).bold()),
                 ])),
                 rows[2],
             );
@@ -551,8 +552,8 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
             .take(rows[3].height.saturating_sub(1) as usize)
             .map(|finding| {
                 let (glyph, color) = match finding.level {
-                    crate::app::validate::Level::Error => ("✕", BAD),
-                    crate::app::validate::Level::Warn => ("⚠", Color::Rgb(234, 179, 8)),
+                    crate::app::validate::Level::Error => ("✕", theme().bad),
+                    crate::app::validate::Level::Warn => ("⚠", theme().warn),
                 };
                 let mut spans = vec![
                     Span::styled(format!("{glyph} "), Style::new().fg(color)),
@@ -565,16 +566,16 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
                                 finding.role.clone()
                             }
                         ),
-                        Style::new().fg(Color::Rgb(96, 165, 250)),
+                        Style::new().fg(theme().info),
                     ),
-                    Span::styled(finding.message.clone(), Style::new().fg(Color::Rgb(176, 180, 210))),
+                    Span::styled(finding.message.clone(), Style::new().fg(theme().dim)),
                 ];
                 if let (Some(expected), Some(actual)) = (&finding.expected, &finding.actual) {
                     spans.push(Span::styled(
                         format!("  expected {}", short(expected)),
-                        Style::new().fg(OK),
+                        Style::new().fg(theme().ok),
                     ));
-                    spans.push(Span::styled(format!("  got {}", short(actual)), Style::new().fg(BAD)));
+                    spans.push(Span::styled(format!("  got {}", short(actual)), Style::new().fg(theme().bad)));
                 }
                 Line::from(spans)
             })
@@ -607,15 +608,15 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
         .map(|(i, account)| {
             let flagged = findings.iter().find(|finding| finding.index == i);
             let (glyph, glyph_style) = match flagged.map(|f| f.level) {
-                Some(crate::app::validate::Level::Error) => ("✕ ", Style::new().fg(BAD)),
-                Some(crate::app::validate::Level::Warn) => ("⚠ ", Style::new().fg(Color::Rgb(234, 179, 8))),
-                None => ("● ", Style::new().fg(if account.writable { ACCENT } else { MUTED })),
+                Some(crate::app::validate::Level::Error) => ("✕ ", Style::new().fg(theme().bad)),
+                Some(crate::app::validate::Level::Warn) => ("⚠ ", Style::new().fg(theme().warn)),
+                None => ("● ", Style::new().fg(if account.writable { theme().accent } else { theme().muted })),
             };
             ListItem::new(Line::from(vec![
                 Span::styled(glyph, glyph_style),
                 Span::styled(
                     format!("{:<24.23} ", roles.get(i).cloned().unwrap_or_default()),
-                    Style::new().fg(Color::Rgb(96, 165, 250)),
+                    Style::new().fg(theme().info),
                 ),
                 Span::raw(format!("{:<16}", short(&account.key))),
                 Span::styled(account.role(), muted()),
@@ -624,7 +625,7 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
         .collect();
     let mut state = ListState::default().with_selected(Some(selected_row.min(items.len().saturating_sub(1))));
     f.render_stateful_widget(
-        List::new(items).highlight_style(Style::new().bg(Color::Rgb(38, 38, 58)).bold()),
+        List::new(items).highlight_style(Style::new().bg(theme().select).bold()),
         accounts_inner,
         &mut state,
     );
@@ -639,9 +640,9 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
         .rev()
         .map(|line| {
             let style = if line.contains("failed:") || line.contains("Error") {
-                Style::new().fg(BAD)
+                Style::new().fg(theme().bad)
             } else if line.starts_with("Program log:") {
-                Style::new().fg(Color::Rgb(176, 180, 210))
+                Style::new().fg(theme().dim)
             } else {
                 muted()
             };
@@ -690,7 +691,7 @@ fn render_sections(f: &mut Frame, area: Rect, app: &mut App) {
             };
             let active = index == selected;
             let block = panel(screen.title(), active)
-                .border_style(Style::new().fg(if active { ACCENT } else { PANEL }))
+                .border_style(Style::new().fg(if active { theme().accent } else { theme().panel }))
                 .padding(Padding::horizontal(1));
             let inner = block.inner(*cell);
             f.render_widget(block, *cell);
@@ -699,9 +700,9 @@ fn render_sections(f: &mut Frame, area: Rect, app: &mut App) {
                     Line::styled(
                         headline.clone(),
                         if active {
-                            Style::new().fg(ACCENT).bold()
+                            Style::new().fg(theme().accent).bold()
                         } else {
-                            Style::new().fg(Color::White)
+                            Style::new().fg(theme().strong)
                         },
                     ),
                     Line::styled(detail.clone(), muted()),
@@ -763,16 +764,16 @@ fn flow(f: &mut Frame, area: Rect, app: &mut App) {
         let node = &tx.nodes[transfer.node];
         let failed = node.status == Status::Failed;
         let accent = if failed {
-            BAD
+            theme().bad
         } else if active {
-            ACCENT
+            theme().accent
         } else {
-            PANEL
+            theme().panel
         };
         let text = if active {
-            Style::new().fg(Color::White).bold()
+            Style::new().fg(theme().strong).bold()
         } else {
-            Style::new().fg(Color::Rgb(176, 180, 210))
+            Style::new().fg(theme().dim)
         };
 
         let left = Rect {
@@ -802,7 +803,7 @@ fn flow(f: &mut Frame, area: Rect, app: &mut App) {
             &format!("-{amount}"),
             accent,
             text,
-            BAD,
+            theme().bad,
         );
         draw_box(
             f,
@@ -814,7 +815,7 @@ fn flow(f: &mut Frame, area: Rect, app: &mut App) {
             accent,
         );
         if right.x + right.width <= inner.x + inner.width {
-            draw_box(f, right, &short(&transfer.to), &format!("+{amount}"), accent, text, OK);
+            draw_box(f, right, &short(&transfer.to), &format!("+{amount}"), accent, text, theme().ok);
         }
 
         let arrow_y = y + box_height / 2;
@@ -841,7 +842,7 @@ fn flow(f: &mut Frame, area: Rect, app: &mut App) {
                 Paragraph::new(Line::styled(
                     label,
                     if active {
-                        Style::new().fg(ACCENT).bold()
+                        Style::new().fg(theme().accent).bold()
                     } else {
                         muted()
                     },
@@ -939,8 +940,8 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
     let share = node.cu as f64 / tx.cu.max(1) as f64;
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(format!("{} ", node.path), Style::new().fg(ACCENT).bold()),
-            Span::styled(node.label.clone(), Style::new().fg(Color::White).bold()),
+            Span::styled(format!("{} ", node.path), Style::new().fg(theme().accent).bold()),
+            Span::styled(node.label.clone(), Style::new().fg(theme().strong).bold()),
             Span::raw("  "),
             chip(
                 match node.status {
@@ -957,7 +958,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         match (tx.failed_node, tx.failed_node.map(|i| i == index)) {
             (Some(failed), Some(false)) if app.failure_path().contains(&index) => Line::styled(
                 format!("failure propagated from instruction {}", tx.nodes[failed].path),
-                Style::new().fg(BAD),
+                Style::new().fg(theme().bad),
             ),
             _ => Line::raw(""),
         },
@@ -966,7 +967,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         Line::from(vec![
             Span::styled(
                 format!("{} self", thousands(node.self_cu as u64)),
-                Style::new().fg(ACCENT).bold(),
+                Style::new().fg(theme().accent).bold(),
             ),
             Span::styled(
                 format!(
@@ -990,10 +991,10 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
 
     if let Some(error) = &node.error {
         let diagnosed = tx.failure.as_ref().filter(|failure| failure.node == Some(index));
-        lines.push(Line::styled("ERROR", Style::new().fg(BAD)));
+        lines.push(Line::styled("ERROR", Style::new().fg(theme().bad)));
         lines.push(Line::styled(
             diagnosed.map_or_else(|| error.clone(), Failure::label),
-            Style::new().fg(BAD).bold(),
+            Style::new().fg(theme().bad).bold(),
         ));
         if let Some(failure) = diagnosed {
             if !failure.meaning.is_empty() {
@@ -1008,7 +1009,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
     let room = inner.height as usize;
     for account in node.accounts.iter().take(room.saturating_sub(lines.len() + 4)) {
         lines.push(Line::from(vec![
-            Span::styled("● ", Style::new().fg(if account.writable { ACCENT } else { MUTED })),
+            Span::styled("● ", Style::new().fg(if account.writable { theme().accent } else { theme().muted })),
             Span::raw(format!("{:<16}", short(&account.key))),
             Span::styled(account.role(), muted()),
         ]));
@@ -1021,7 +1022,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
                 lines.push(Line::styled("DATA — parsed", muted()));
                 lines.extend(fields.into_iter().map(|(key, value)| {
                     Line::from(vec![
-                        Span::styled(format!("{key:<13}"), Style::new().fg(Color::Rgb(96, 165, 250))),
+                        Span::styled(format!("{key:<13}"), Style::new().fg(theme().info)),
                         Span::raw(value),
                     ])
                 }));
@@ -1053,10 +1054,10 @@ fn accounts(f: &mut Frame, area: Rect, app: &mut App) {
                 .join(" ");
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{i:>3}  "), muted()),
-                Span::styled("● ", Style::new().fg(if account.writable { ACCENT } else { MUTED })),
+                Span::styled("● ", Style::new().fg(if account.writable { theme().accent } else { theme().muted })),
                 Span::raw(format!("{:<46}", account.key)),
                 Span::styled(format!("{:<18}", account.role()), muted()),
-                Span::styled(format!("ix {touches}"), Style::new().fg(Color::Rgb(96, 165, 250))),
+                Span::styled(format!("ix {touches}"), Style::new().fg(theme().info)),
             ]))
         })
         .collect();
@@ -1075,7 +1076,7 @@ fn accounts(f: &mut Frame, area: Rect, app: &mut App) {
     let mut state = app.list;
     state.select(Some(app.selected_row()));
     f.render_stateful_widget(
-        List::new(items).highlight_style(Style::new().bg(Color::Rgb(38, 38, 58))),
+        List::new(items).highlight_style(Style::new().bg(theme().select)),
         inner,
         &mut state,
     );
@@ -1132,7 +1133,7 @@ fn state_diff(f: &mut Frame, area: Rect, app: &mut App) {
                 Span::raw(format!("{:>18.6}", change.after)),
                 Span::styled(
                     format!("{delta:>+18.6}"),
-                    Style::new().fg(if delta < 0.0 { BAD } else { OK }).bold(),
+                    Style::new().fg(if delta < 0.0 { theme().bad } else { theme().ok }).bold(),
                 ),
             ];
             if graph_width > 0 {
@@ -1147,7 +1148,7 @@ fn state_diff(f: &mut Frame, area: Rect, app: &mut App) {
     let mut state = app.list;
     state.select(Some(app.selected_row()));
     f.render_stateful_widget(
-        List::new(items).highlight_style(Style::new().bg(Color::Rgb(38, 38, 58))),
+        List::new(items).highlight_style(Style::new().bg(theme().select)),
         body,
         &mut state,
     );
@@ -1169,11 +1170,11 @@ fn logs(f: &mut Frame, area: Rect, app: &mut App) {
             let line = &tx.logs[i];
 
             let style = if line.contains("failed") {
-                Style::new().fg(BAD)
+                Style::new().fg(theme().bad)
             } else if line.starts_with("Program log:") {
-                Style::new().fg(Color::Rgb(176, 180, 210))
+                Style::new().fg(theme().dim)
             } else if failed {
-                Style::new().fg(Color::Rgb(233, 164, 170))
+                Style::new().fg(theme().bad_soft)
             } else {
                 muted()
             };
@@ -1184,7 +1185,7 @@ fn logs(f: &mut Frame, area: Rect, app: &mut App) {
                 ),
                 Span::styled(
                     "│ ".repeat(depth),
-                    Style::new().fg(if failed { Color::Rgb(128, 72, 78) } else { PANEL }),
+                    Style::new().fg(if failed { theme().bad_dim } else { theme().panel }),
                 ),
                 Span::styled(compact_keys(line), style),
             ]))
@@ -1194,7 +1195,7 @@ fn logs(f: &mut Frame, area: Rect, app: &mut App) {
     let mut state = app.list;
     state.select(Some(app.selected_row()));
     f.render_stateful_widget(
-        List::new(items).highlight_style(Style::new().bg(Color::Rgb(38, 38, 58))),
+        List::new(items).highlight_style(Style::new().bg(theme().select)),
         inner,
         &mut state,
     );
@@ -1275,13 +1276,13 @@ fn account_info(f: &mut Frame, area: Rect, app: &mut App) {
 
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(account.key.clone(), Style::new().fg(Color::White).bold()),
+            Span::styled(account.key.clone(), Style::new().fg(theme().strong).bold()),
             Span::raw("  "),
-            chip(if account.executable { "program" } else { "account" }, ACCENT),
+            chip(if account.executable { "program" } else { "account" }, theme().accent),
             Span::raw("  "),
             chip(
                 decoded.as_ref().map_or("unknown layout", |(name, _)| name),
-                Color::Rgb(96, 165, 250),
+                theme().info,
             ),
         ]),
         Line::raw(""),
@@ -1289,7 +1290,7 @@ fn account_info(f: &mut Frame, area: Rect, app: &mut App) {
             Span::styled("BALANCE   ", muted()),
             Span::styled(
                 format!("{:.9} SOL", account.lamports as f64 / 1e9),
-                Style::new().fg(ACCENT).bold(),
+                Style::new().fg(theme().accent).bold(),
             ),
             Span::styled(format!("  ({} lamports)", thousands(account.lamports)), muted()),
         ]),
@@ -1316,7 +1317,7 @@ fn account_info(f: &mut Frame, area: Rect, app: &mut App) {
             lines.push(Line::styled(format!("PARSED — {name}"), muted()));
             lines.extend(fields.into_iter().map(|(key, value)| {
                 Line::from(vec![
-                    Span::styled(format!("{key:<18}"), Style::new().fg(Color::Rgb(96, 165, 250))),
+                    Span::styled(format!("{key:<18}"), Style::new().fg(theme().info)),
                     Span::raw(value),
                 ])
             }));
@@ -1355,7 +1356,7 @@ fn account_data(f: &mut Frame, area: Rect, app: &mut App) {
     if let Some((_, fields)) = &decoded {
         parsed.extend(fields.iter().map(|(key, value)| {
             Line::from(vec![
-                Span::styled(format!("{key:<18}"), Style::new().fg(Color::Rgb(96, 165, 250))),
+                Span::styled(format!("{key:<18}"), Style::new().fg(theme().info)),
                 Span::raw(value.clone()),
             ])
         }));
@@ -1370,7 +1371,7 @@ fn account_data(f: &mut Frame, area: Rect, app: &mut App) {
         .map(|(offset, hex, ascii)| {
             Line::from(vec![
                 Span::styled(format!("{offset}  "), muted()),
-                Span::styled(format!("{hex:<50}"), Style::new().fg(Color::Rgb(96, 165, 250))),
+                Span::styled(format!("{hex:<50}"), Style::new().fg(theme().info)),
                 Span::styled(format!(" │{ascii}"), muted()),
             ])
         })
@@ -1403,6 +1404,7 @@ fn help(f: &mut Frame, area: Rect) {
         ("/", "search current view"),
         ("o", "open a transaction signature"),
         ("r", "refetch, bypassing cache"),
+        ("t", "cycle theme: dark · light · mono"),
         ("g / G", "jump to top / bottom"),
         ("? / Esc", "toggle help / cancel"),
         ("q", "quit"),
@@ -1412,7 +1414,7 @@ fn help(f: &mut Frame, area: Rect) {
             keys.iter()
                 .map(|(k, v)| {
                     Line::from(vec![
-                        Span::styled(format!(" {k:<12}"), Style::new().fg(ACCENT).bold()),
+                        Span::styled(format!(" {k:<12}"), Style::new().fg(theme().accent).bold()),
                         Span::styled(*v, muted()),
                     ])
                 })
@@ -1430,7 +1432,7 @@ fn diagnostic_span(tx: &Tx, failure: &Failure) -> Vec<Line<'static>> {
             Span::styled(value, Style::new().fg(color)),
         ])
     };
-    let plain = Color::Rgb(176, 180, 210);
+    let plain = theme().dim;
     let mut lines = Vec::new();
 
     if let Some((key, balance)) = payer_line(tx) {
@@ -1450,7 +1452,7 @@ fn diagnostic_span(tx: &Tx, failure: &Failure) -> Vec<Line<'static>> {
         lines.push(pointer(
             "",
             "account list incomplete — address table lookups unresolved, account checks withheld".into(),
-            Color::Rgb(233, 196, 106),
+            theme().warn,
         ));
     }
     lines
@@ -1463,29 +1465,29 @@ fn diagnostic_span(tx: &Tx, failure: &Failure) -> Vec<Line<'static>> {
 /// wrap mid-key, and a wrapped key cannot be copied in one piece.
 fn diagnostic_note(note: &crate::app::diagnose::Note) -> Vec<Line<'static>> {
     let (keyword, color) = match note.tier {
-        Tier::Note => ("   = note: ", MUTED),
-        Tier::Help => ("   = help: ", ACCENT),
-        Tier::Fix => ("   = fix:  ", OK),
+        Tier::Note => ("   = note: ", theme().muted),
+        Tier::Help => ("   = help: ", theme().accent),
+        Tier::Fix => ("   = fix:  ", theme().ok),
         Tier::Span => unreachable!("span notes are rendered by diagnostic_span"),
     };
     let inferred = note.confidence == Confidence::Likely;
     let mut spans = vec![Span::styled(keyword, Style::new().fg(color))];
     if inferred {
-        spans.push(Span::styled("maybe — ", Style::new().fg(MUTED).italic()));
+        spans.push(Span::styled("maybe — ", Style::new().fg(theme().muted).italic()));
     }
     spans.push(Span::styled(
         note.text.clone(),
         if inferred {
             muted()
         } else {
-            Style::new().fg(Color::Rgb(176, 180, 210))
+            Style::new().fg(theme().dim)
         },
     ));
 
     let mut lines = vec![Line::from(spans)];
     for (label, value, color) in [
-        ("expected", note.expected.as_ref(), OK),
-        ("actual  ", note.actual.as_ref(), BAD),
+        ("expected", note.expected.as_ref(), theme().ok),
+        ("actual  ", note.actual.as_ref(), theme().bad),
     ] {
         let Some(value) = value else { continue };
         lines.push(Line::from(vec![
@@ -1500,8 +1502,8 @@ fn diagnostic_note(note: &crate::app::diagnose::Note) -> Vec<Line<'static>> {
 /// span pointing at the failing instruction, then tiered note/help/fix lines.
 fn diagnostic(tx: &Tx, failure: &Failure) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(vec![
-        Span::styled("✕ ", Style::new().fg(BAD).bold()),
-        Span::styled(failure.label(), Style::new().fg(BAD).bold()),
+        Span::styled("✕ ", Style::new().fg(theme().bad).bold()),
+        Span::styled(failure.label(), Style::new().fg(theme().bad).bold()),
     ])];
 
     if let Some(index) = failure.node.or(tx.failed_node) {
@@ -1509,12 +1511,12 @@ fn diagnostic(tx: &Tx, failure: &Failure) -> Vec<Line<'static>> {
             Span::styled("  --> ", muted()),
             Span::styled(
                 format!("instruction {}", tx.nodes[index].path),
-                Style::new().fg(Color::White).bold(),
+                Style::new().fg(theme().strong).bold(),
             ),
             Span::styled("  ·  ", muted()),
             Span::styled(
                 call_path(tx, index).join("  →  "),
-                Style::new().fg(Color::Rgb(233, 164, 170)),
+                Style::new().fg(theme().bad_soft),
             ),
         ]));
     }
@@ -1522,7 +1524,7 @@ fn diagnostic(tx: &Tx, failure: &Failure) -> Vec<Line<'static>> {
 
     if !failure.meaning.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("   = note: ", Style::new().fg(MUTED)),
+            Span::styled("   = note: ", Style::new().fg(theme().muted)),
             Span::styled(failure.meaning.clone(), muted()),
         ]));
     }
