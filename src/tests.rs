@@ -1928,3 +1928,15 @@ fn cpi_pda_authorities_are_not_reported_as_missing_signers() {
         "an on-curve key is a real keypair that had to sign"
     );
 }
+
+#[test]
+fn bars_draw_eighths_and_diverge_from_zero() {
+    use crate::ui::widgets::{delta_bar, smooth};
+    let text = |spans: Vec<Span>| spans.iter().map(|s| s.content.to_string()).collect::<String>();
+    assert_eq!(smooth(2.5), "██▌");
+    assert_eq!(smooth(0.0), "");
+    assert_eq!(text(delta_bar(1.0, 11)), "     │█████");
+    assert_eq!(text(delta_bar(-1.0, 11)), "█████│");
+    // A tiny nonzero change still shows, so it never reads as no change.
+    assert_eq!(text(delta_bar(-0.001, 11)), "    █│");
+}

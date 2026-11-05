@@ -387,7 +387,7 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
         &mut state,
     );
 
-    render_compute_chart(f, rows[1], tx, selected_node, false);
+    render_compute_chart(f, rows[1], tx, selected_node, false, app.anim());
     clickable_rows(app, inner, visible.len());
 }
 
@@ -978,7 +978,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             ),
         ]),
         Line::from(bar(
-            (share * (inner.width.saturating_sub(2)) as f64) as usize,
+            share * inner.width.saturating_sub(2) as f64 * app.anim(),
             inner.width.saturating_sub(2) as usize,
             status_color(node.status),
         )),
@@ -1090,6 +1090,10 @@ fn state_diff(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
     let rows = app.balance_rows();
+    let graph_width = match (inner.width as usize).saturating_sub(86 + 2 + 1) {
+        w if w >= 11 => w.min(41),
+        _ => 0,
+    };
     let header = Rect { height: 1, ..inner };
     let body = Rect {
         y: inner.y + 1,
@@ -1099,19 +1103,29 @@ fn state_diff(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(
         Paragraph::new(Line::styled(
             format!(
-                "{:<18}{:<14}{:>18}{:>18}{:>18}",
-                "ACCOUNT", "ASSET", "PRE", "POST", "CHANGE"
+                "{:<18}{:<14}{:>18}{:>18}{:>18}  {}",
+                "ACCOUNT", "ASSET", "PRE", "POST", "CHANGE",
+                if graph_width > 0 { "← OUT · IN →" } else { "" }
             ),
             muted(),
         )),
         header,
     );
+    // Bars scale per asset: lamports and token units aren't comparable.
+    let largest = |label: &str| {
+        tx.balances
+            .iter()
+            .filter(|b| b.label == label)
+            .map(|b| (b.after - b.before).abs())
+            .fold(0.0, f64::max)
+    };
+    let progress = app.anim();
     let items: Vec<ListItem> = rows
         .iter()
         .map(|&i| &tx.balances[i])
         .map(|change| {
             let delta = change.after - change.before;
-            ListItem::new(Line::from(vec![
+            let mut spans = vec![
                 Span::raw(format!("{:<18}", short(&change.key))),
                 Span::styled(format!("{:<14}", change.label), muted()),
                 Span::styled(format!("{:>18.6}", change.before), muted()),
@@ -1120,7 +1134,13 @@ fn state_diff(f: &mut Frame, area: Rect, app: &mut App) {
                     format!("{delta:>+18.6}"),
                     Style::new().fg(if delta < 0.0 { BAD } else { OK }).bold(),
                 ),
-            ]))
+            ];
+            if graph_width > 0 {
+                let ratio = delta / largest(&change.label).max(f64::MIN_POSITIVE);
+                spans.push(Span::raw("  "));
+                spans.extend(delta_bar(ratio * progress, graph_width));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
     clickable_rows(app, body, items.len());

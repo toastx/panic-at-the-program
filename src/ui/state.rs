@@ -1,9 +1,20 @@
 use std::collections::HashSet;
+use std::time::Instant;
 
 use ratatui::layout::{Position, Rect};
 use ratatui::widgets::ListState;
 
 use crate::app::solana::{self, AccountInfo, Entry, Kind, Tx};
+
+const ANIM_SECS: f64 = 0.45;
+
+fn ease(since: Instant) -> f64 {
+    if cfg!(test) {
+        return 1.0;
+    }
+    let t = (since.elapsed().as_secs_f64() / ANIM_SECS).min(1.0);
+    1.0 - (1.0 - t).powi(3)
+}
 
 pub const BUILTIN: [&str; 4] = ["mainnet", "devnet", "testnet", "localnet"];
 
@@ -125,6 +136,10 @@ pub struct App {
     pub cluster_menu: bool,
     pub cluster_index: usize,
     pub hits: Vec<Hit>,
+    /// When the current screen appeared; drives the grow-in animation.
+    pub shown_at: Instant,
+    /// When the current tx or account was loaded; drives load-only animations.
+    pub loaded_at: Instant,
 }
 
 impl App {
@@ -152,6 +167,8 @@ impl App {
             cluster_menu: false,
             cluster_index: 0,
             hits: Vec::new(),
+            shown_at: Instant::now(),
+            loaded_at: Instant::now(),
         }
     }
 
@@ -221,6 +238,7 @@ impl App {
                 let mut tx = solana::parse(signature, &self.cluster, &value);
                 crate::app::idl::enrich(&mut tx);
                 self.tx = Some(tx);
+                self.loaded_at = Instant::now();
                 self.collapsed.clear();
                 self.kind = Kind::Tx;
                 self.focus_nav = false;
@@ -238,6 +256,7 @@ impl App {
         match solana::fetch_account(&self.cluster, pubkey) {
             Ok(value) => {
                 self.account = Some(solana::parse_account(pubkey, &value));
+                self.loaded_at = Instant::now();
                 self.kind = Kind::Account;
                 self.focus_nav = false;
                 self.goto(Screen::Info);
@@ -360,6 +379,21 @@ impl App {
             self.list.select(None);
         }
         self.scroll = 0;
+        self.shown_at = Instant::now();
+    }
+
+    /// Ease-out progress since the current screen appeared, 0.0 → 1.0.
+    pub fn anim(&self) -> f64 {
+        ease(self.shown_at)
+    }
+
+    /// Ease-out progress since the current tx or account loaded, 0.0 → 1.0.
+    pub fn load_anim(&self) -> f64 {
+        ease(self.loaded_at)
+    }
+
+    pub fn animating(&self) -> bool {
+        self.anim() < 1.0 || self.load_anim() < 1.0
     }
 
     pub fn back(&mut self) -> bool {

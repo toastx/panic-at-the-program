@@ -64,12 +64,40 @@ pub fn status_color(status: Status) -> Color {
     }
 }
 
-pub fn bar(filled: usize, width: usize, color: Color) -> Vec<Span<'static>> {
-    let filled = filled.min(width);
+/// A bar `cells` wide (fractional, drawn in eighths) on a `width`-cell track.
+pub fn bar(cells: f64, width: usize, color: Color) -> Vec<Span<'static>> {
+    let solid = smooth(cells.clamp(0.0, width as f64));
+    let rest = width - solid.chars().count();
     vec![
-        Span::styled("█".repeat(filled), Style::new().fg(color)),
-        Span::styled("░".repeat(width - filled), Style::new().fg(PANEL)),
+        Span::styled(solid, Style::new().fg(color)),
+        Span::styled("░".repeat(rest), Style::new().fg(PANEL)),
     ]
+}
+
+/// `cells` worth of █, with the remainder as a partial block (▏▎▍▌▋▊▉).
+pub fn smooth(cells: f64) -> String {
+    const PARTS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+    let eighths = (cells.max(0.0) * 8.0).round() as usize;
+    "█".repeat(eighths / 8) + PARTS[eighths % 8]
+}
+
+/// Diverging bar centred on a zero axis: losses grow left in red, gains right
+/// in green. `ratio` is the change over the largest change, -1.0 ..= 1.0.
+pub fn delta_bar(ratio: f64, width: usize) -> Vec<Span<'static>> {
+    let half = width.saturating_sub(1) / 2;
+    let cells = (ratio.abs().min(1.0) * half as f64).max(if ratio == 0.0 { 0.0 } else { 0.125 });
+    let axis = Span::styled("│", muted());
+    if ratio < 0.0 {
+        // Partial blocks only fill from the left, so the left side rounds to whole cells.
+        let n = (cells.ceil() as usize).min(half);
+        vec![
+            Span::raw(" ".repeat(half - n)),
+            Span::styled("█".repeat(n), Style::new().fg(BAD)),
+            axis,
+        ]
+    } else {
+        vec![Span::raw(" ".repeat(half)), axis, Span::styled(smooth(cells), Style::new().fg(OK))]
+    }
 }
 
 pub fn tree_prefixes(nodes: &[Node]) -> Vec<String> {
@@ -140,7 +168,7 @@ pub fn render_topbar(f: &mut Frame, area: Rect, app: &mut App) {
                     pct * 100.0
                 )),
             ]);
-            spans.extend(bar((pct * 10.0) as usize, 10, ACCENT));
+            spans.extend(bar(pct * 10.0 * app.load_anim(), 10, ACCENT));
         }
         (Kind::Account, _, Some(account)) => {
             spans.extend([
@@ -344,7 +372,7 @@ pub fn node_label(node: &Node) -> String {
     }
 }
 
-pub fn render_compute_chart(f: &mut Frame, area: Rect, tx: &Tx, selected: usize, focused: bool) {
+pub fn render_compute_chart(f: &mut Frame, area: Rect, tx: &Tx, selected: usize, focused: bool, progress: f64) {
     let block = panel("COMPUTE UNITS BY INSTRUCTION (SELF COST)", focused);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -368,7 +396,7 @@ pub fn render_compute_chart(f: &mut Frame, area: Rect, tx: &Tx, selected: usize,
         } else {
             Color::Rgb(96, 165, 250)
         };
-        let filled = (node.self_cu as usize * bar_width) / max as usize;
+        let cells = node.self_cu as f64 * bar_width as f64 / max as f64 * progress;
         let mut spans = vec![Span::styled(
             format!("{label:<label_width$.label_width$}"),
             if i == selected {
@@ -377,11 +405,14 @@ pub fn render_compute_chart(f: &mut Frame, area: Rect, tx: &Tx, selected: usize,
                 Style::new()
             },
         )];
-        spans.push(Span::styled(
-            "█".repeat(filled.max(usize::from(node.self_cu > 0))),
-            Style::new().fg(color),
-        ));
-        spans.push(Span::raw(format!(" {}", thousands(node.self_cu as u64))));
+        // Any nonzero cost keeps at least a sliver, so it never reads as zero.
+        let min = if node.self_cu > 0 { 0.125 } else { 0.0 };
+        // Pad to the full track so the value sits in a fixed column while the bar grows.
+        let solid = smooth(cells.max(min));
+        let pad = bar_width.saturating_sub(solid.chars().count());
+        spans.push(Span::styled(solid, Style::new().fg(color)));
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::raw(format!(" {:>value_width$}", thousands(node.self_cu as u64))));
         lines.push(Line::from(spans));
     }
 

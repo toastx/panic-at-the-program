@@ -48,6 +48,10 @@ fn main() -> io::Result<()> {
 
     while !app.quit {
         term.draw(|f| ui::screens::draw(f, &mut app))?;
+        // ~60fps while bars grow in; otherwise block on input as before.
+        if app.animating() && !event::poll(std::time::Duration::from_millis(16))? {
+            continue;
+        }
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => on_key(&mut app, key),
             Event::Mouse(mouse) => match mouse.kind {
