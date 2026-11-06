@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::backend::TestBackend;
 use ratatui::prelude::*;
 
+use crate::ai;
 use crate::app::errors::{self, anchor};
 use crate::app::{diagnose, idl, solana, validate};
 use crate::on_key;
@@ -85,7 +86,7 @@ fn account_fixture() -> serde_json::Value {
     data[36..44].copy_from_slice(&21_000_000_000_000u64.to_le_bytes());
     data[44] = 6;
     data[45] = 1;
-    let encoded = base64_encode(&data);
+    let encoded = solana::base64_encode(&data);
     json!({"result": {"value": {
         "lamports": 2039280u64,
         "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
@@ -93,23 +94,6 @@ fn account_fixture() -> serde_json::Value {
         "rentEpoch": u64::MAX,
         "data": [encoded, "base64"]
     }}})
-}
-
-fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(TABLE[((n >> (18 - i * 6)) & 0x3f) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
 }
 
 fn fixture() -> serde_json::Value {
@@ -1864,6 +1848,31 @@ fn inferred_advice_renders_as_a_guess_not_an_instruction() {
     );
     // The certain advice on the same diagnosis carries no hedge.
     assert!(screen.contains("= help: re-derive the PDA"), "{screen}");
+}
+
+#[test]
+fn ai_context_carries_the_diagnosis_tree_and_accounts() {
+    let tx = solana::parse("4vK9mP", "devnet", &constraint_fixture());
+    let context = ai::markdown(&tx);
+
+    assert!(context.starts_with("Help me debug why this Solana transaction failed."));
+    assert!(
+        context.contains("`4vK9mP`"),
+        "the signature is what an agent looks up:\n{context}"
+    );
+    assert!(context.contains("error[anchor.2006]: ConstraintSeeds"), "{context}");
+    assert!(
+        context.contains("- program: `Vau1t11111111111111111111111111111111111`"),
+        "the failing program:\n{context}"
+    );
+    // The notes keep their tiers, so a fix does not read as a guess.
+    assert!(context.contains("- help: re-derive the PDA"), "{context}");
+    assert!(context.contains("4000 CU"), "the tree carries compute:\n{context}");
+    assert!(
+        context.contains("AnchorError thrown in"),
+        "the failing frame's logs:\n{context}"
+    );
+    assert!(context.contains("signer, writable"), "the account roles:\n{context}");
 }
 
 #[test]

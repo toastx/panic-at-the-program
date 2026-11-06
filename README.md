@@ -57,6 +57,26 @@ panic rpc rm <name>            # remove it
 
 Custom endpoints live in `~/.config/panic/config.toml` and show up in the cluster menu alongside the built-ins.
 
+### AI agent export
+
+The first time the TUI opens it asks whether to enable AI export, and which agent to hand a diagnosis to (`claude` by default; `codex`, `gemini`, `opencode` work the same way). The answer is remembered in `~/.config/panic/config.toml`:
+
+```toml
+[ai]
+enabled = "true"
+agent = "claude"
+```
+
+```sh
+panic ai                       # show the current setting
+panic ai on | off              # enable or disable it
+panic ai agent codex           # hand diagnoses to a different agent
+```
+
+On a transaction, `y` copies the diagnosis as markdown — the error and what it means, the notes with their tiers, the failing instruction, the CPI tree with compute units, the failing frame's logs, and the account list. The copy goes through an OSC 52 escape, so it reaches your clipboard over SSH too.
+
+`a` hands the same markdown to the agent as its opening prompt. `panic` steps aside, the agent runs in this terminal, and the TUI comes back when it exits — no second window, nothing to configure per terminal emulator.
+
 ## What you get
 
 A transaction opens into a set of screens: **Overview**, **Execution** (weighted CPI tree with per-frame compute), **Invocation**, **Accounts**, **Flow** (token transfers), **State Diff**, and **Logs** (nested under their invocation frames). Accounts open into **Info**, **Data** (parsed through the IDL when one is found), and **Raw**.
@@ -85,6 +105,8 @@ A transaction opens into a set of screens: **Overview**, **Execution** (weighted
 | `c` / `[` `]` | Cluster menu / previous, next cluster |
 | `r` | Refetch |
 | `x` | Open in explorer |
+| `y` | Copy the diagnosis as AI context |
+| `a` | Send the diagnosis to your AI agent |
 | `?` | Help |
 | `q` | Quit |
 
@@ -113,5 +135,4 @@ idl_dir = "target/idl"
 - [ ] **Source Invokation** — invoke panic from the workspace but running tests and reading diagnosis.
 - [ ] **Token Registry** — resolve mints to names, symbols, and decimals instead of raw pubkeys.
 - [ ] **Program Registry** — known program IDs and their IDLs, so mainnet programs decode without a local workspace.
-- [ ] **Import to AI Agents** — export a transaction's diagnosis as structured context for an AI agent.
 - [ ] **What-if simulations** — tweak accounts or instruction data and re-simulate to test a fix before shipping it.

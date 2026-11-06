@@ -268,7 +268,9 @@ fn overview(f: &mut Frame, area: Rect, app: &mut App) {
                 Span::raw(format!("{:>16.6}", change.after)),
                 Span::styled(
                     format!("{delta:>+16.6}"),
-                    Style::new().fg(if delta < 0.0 { theme().bad } else { theme().ok }).bold(),
+                    Style::new()
+                        .fg(if delta < 0.0 { theme().bad } else { theme().ok })
+                        .bold(),
                 ),
             ])
         }));
@@ -343,11 +345,7 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
             }
             spans.push(Span::styled(
                 format!("  {} CU", thousands(node.self_cu as u64)),
-                Style::new().fg(if node.self_cu > 0 {
-                    theme().info
-                } else {
-                    theme().muted
-                }),
+                Style::new().fg(if node.self_cu > 0 { theme().info } else { theme().muted }),
             ));
             if is_failure {
                 let message = tx
@@ -357,7 +355,10 @@ fn execution(f: &mut Frame, area: Rect, app: &mut App) {
                     .map(Failure::label)
                     .or_else(|| node.error.clone());
                 if let Some(message) = message {
-                    spans.push(Span::styled(format!("  ⚠ {message}"), Style::new().fg(theme().bad).bold()));
+                    spans.push(Span::styled(
+                        format!("  ⚠ {message}"),
+                        Style::new().fg(theme().bad).bold(),
+                    ));
                 }
             } else if on_path {
                 spans.push(Span::styled("  propagated", Style::new().fg(theme().bad_dim)));
@@ -575,7 +576,10 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
                         format!("  expected {}", short(expected)),
                         Style::new().fg(theme().ok),
                     ));
-                    spans.push(Span::styled(format!("  got {}", short(actual)), Style::new().fg(theme().bad)));
+                    spans.push(Span::styled(
+                        format!("  got {}", short(actual)),
+                        Style::new().fg(theme().bad),
+                    ));
                 }
                 Line::from(spans)
             })
@@ -610,7 +614,14 @@ fn invocation(f: &mut Frame, area: Rect, app: &mut App) {
             let (glyph, glyph_style) = match flagged.map(|f| f.level) {
                 Some(crate::app::validate::Level::Error) => ("✕ ", Style::new().fg(theme().bad)),
                 Some(crate::app::validate::Level::Warn) => ("⚠ ", Style::new().fg(theme().warn)),
-                None => ("● ", Style::new().fg(if account.writable { theme().accent } else { theme().muted })),
+                None => (
+                    "● ",
+                    Style::new().fg(if account.writable {
+                        theme().accent
+                    } else {
+                        theme().muted
+                    }),
+                ),
             };
             ListItem::new(Line::from(vec![
                 Span::styled(glyph, glyph_style),
@@ -815,7 +826,15 @@ fn flow(f: &mut Frame, area: Rect, app: &mut App) {
             accent,
         );
         if right.x + right.width <= inner.x + inner.width {
-            draw_box(f, right, &short(&transfer.to), &format!("+{amount}"), accent, text, theme().ok);
+            draw_box(
+                f,
+                right,
+                &short(&transfer.to),
+                &format!("+{amount}"),
+                accent,
+                text,
+                theme().ok,
+            );
         }
 
         let arrow_y = y + box_height / 2;
@@ -1009,7 +1028,14 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
     let room = inner.height as usize;
     for account in node.accounts.iter().take(room.saturating_sub(lines.len() + 4)) {
         lines.push(Line::from(vec![
-            Span::styled("● ", Style::new().fg(if account.writable { theme().accent } else { theme().muted })),
+            Span::styled(
+                "● ",
+                Style::new().fg(if account.writable {
+                    theme().accent
+                } else {
+                    theme().muted
+                }),
+            ),
             Span::raw(format!("{:<16}", short(&account.key))),
             Span::styled(account.role(), muted()),
         ]));
@@ -1054,7 +1080,14 @@ fn accounts(f: &mut Frame, area: Rect, app: &mut App) {
                 .join(" ");
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{i:>3}  "), muted()),
-                Span::styled("● ", Style::new().fg(if account.writable { theme().accent } else { theme().muted })),
+                Span::styled(
+                    "● ",
+                    Style::new().fg(if account.writable {
+                        theme().accent
+                    } else {
+                        theme().muted
+                    }),
+                ),
                 Span::raw(format!("{:<46}", account.key)),
                 Span::styled(format!("{:<18}", account.role()), muted()),
                 Span::styled(format!("ix {touches}"), Style::new().fg(theme().info)),
@@ -1105,7 +1138,11 @@ fn state_diff(f: &mut Frame, area: Rect, app: &mut App) {
         Paragraph::new(Line::styled(
             format!(
                 "{:<18}{:<14}{:>18}{:>18}{:>18}  {}",
-                "ACCOUNT", "ASSET", "PRE", "POST", "CHANGE",
+                "ACCOUNT",
+                "ASSET",
+                "PRE",
+                "POST",
+                "CHANGE",
                 if graph_width > 0 { "← OUT · IN →" } else { "" }
             ),
             muted(),
@@ -1133,7 +1170,9 @@ fn state_diff(f: &mut Frame, area: Rect, app: &mut App) {
                 Span::raw(format!("{:>18.6}", change.after)),
                 Span::styled(
                     format!("{delta:>+18.6}"),
-                    Style::new().fg(if delta < 0.0 { theme().bad } else { theme().ok }).bold(),
+                    Style::new()
+                        .fg(if delta < 0.0 { theme().bad } else { theme().ok })
+                        .bold(),
                 ),
             ];
             if graph_width > 0 {
@@ -1381,7 +1420,7 @@ fn account_data(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn help(f: &mut Frame, area: Rect) {
     let width = 54.min(area.width);
-    let height = 16.min(area.height);
+    let height = 18.min(area.height);
     let popup = Rect {
         x: (area.width - width) / 2,
         y: (area.height - height) / 2,
@@ -1405,6 +1444,8 @@ fn help(f: &mut Frame, area: Rect) {
         ("o", "open a transaction signature"),
         ("r", "refetch, bypassing cache"),
         ("t", "cycle theme: dark · light · mono"),
+        ("y", "copy the diagnosis as AI context"),
+        ("a", "send the diagnosis to your AI agent"),
         ("g / G", "jump to top / bottom"),
         ("? / Esc", "toggle help / cancel"),
         ("q", "quit"),
@@ -1514,10 +1555,7 @@ fn diagnostic(tx: &Tx, failure: &Failure) -> Vec<Line<'static>> {
                 Style::new().fg(theme().strong).bold(),
             ),
             Span::styled("  ·  ", muted()),
-            Span::styled(
-                call_path(tx, index).join("  →  "),
-                Style::new().fg(theme().bad_soft),
-            ),
+            Span::styled(call_path(tx, index).join("  →  "), Style::new().fg(theme().bad_soft)),
         ]));
     }
     lines.extend(diagnostic_span(tx, failure));

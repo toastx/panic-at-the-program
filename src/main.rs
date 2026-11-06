@@ -1,3 +1,4 @@
+mod ai;
 mod app;
 mod suite;
 #[cfg(test)]
@@ -24,6 +25,9 @@ fn main() -> io::Result<()> {
     if signature.as_deref() == Some("rpc") {
         return rpc_command(&args.collect::<Vec<_>>());
     }
+    if signature.as_deref() == Some("ai") {
+        return ai_command(&args.collect::<Vec<_>>());
+    }
 
     // Held until the TUI exits: dropping it kills the validator we started.
     let mut _validator = None;
@@ -40,6 +44,10 @@ fn main() -> io::Result<()> {
         }
         app
     };
+
+    if !ai::configured() {
+        ai::setup()?;
+    }
 
     ui::widgets::load_theme();
     enable_raw_mode()?;
@@ -62,6 +70,9 @@ fn main() -> io::Result<()> {
                 _ => {}
             },
             _ => {}
+        }
+        if let Some(prompt) = app.agent_prompt.take() {
+            run_agent(&mut term, &mut app, &prompt)?;
         }
     }
 
@@ -221,6 +232,61 @@ fn rpc_command(args: &[String]) -> io::Result<()> {
     Ok(())
 }
 
+fn ai_command(args: &[String]) -> io::Result<()> {
+    match args {
+        [on] if on == "on" => workspace::set_global("ai", "enabled", "true")?,
+        [off] if off == "off" => workspace::set_global("ai", "enabled", "false")?,
+        // Joined, so `panic ai agent codex exec` needs no quoting.
+        [agent, command @ ..] if agent == "agent" && !command.is_empty() => {
+            workspace::set_global("ai", "enabled", "true")?;
+            workspace::set_global("ai", "agent", &command.join(" "))?;
+        }
+        [] => {
+            match ai::agent() {
+                Some(agent) => println!("on, agent {agent}"),
+                None => println!("off"),
+            }
+            return Ok(());
+        }
+        _ => {
+            eprintln!(
+                "usage: panic ai                     show the current setting\n       panic ai on | off            enable or disable the export\n       panic ai agent <command>     the agent to hand it to (claude, codex, ...)"
+            );
+            std::process::exit(2);
+        }
+    }
+    println!("saved in {}", workspace::global_path().display());
+    Ok(())
+}
+
+/// Lets the agent have the terminal, then takes it back. Spawning a window
+/// instead would be a guess at which emulator is running.
+fn run_agent(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, prompt: &str) -> io::Result<()> {
+    let Some(agent) = ai::agent() else { return Ok(()) };
+    if !suite::available(ai::program(&agent)) {
+        app.message = format!("`{}` not on PATH", ai::program(&agent));
+        return Ok(());
+    }
+    disable_raw_mode()?;
+    execute!(term.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    let result = ai::send(&agent, prompt);
+    enable_raw_mode()?;
+    execute!(term.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
+    term.clear()?;
+    app.message = match result {
+        Ok(()) => format!("{agent} exited"),
+        Err(err) => format!("{agent}: {err}"),
+    };
+    Ok(())
+}
+
+/// The markdown for what is loaded, when AI export is on and it is a transaction.
+fn ai_context(app: &App) -> Option<String> {
+    ai::agent()?;
+    let tx = app.tx().filter(|_| app.kind == solana::Kind::Tx)?;
+    Some(ai::markdown(tx))
+}
+
 fn move_selection(app: &mut App, delta: isize) {
     if app.screen == Screen::Raw {
         app.scroll = app.scroll.saturating_add_signed(delta);
@@ -367,6 +433,15 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
                 app.message = format!("theme not saved: {err}");
             }
         }
+        KeyCode::Char('y') => {
+            if let Some(text) = ai_context(app) {
+                app.message = match ai::copy(&text) {
+                    Ok(()) => format!("copied diagnosis ({} lines)", text.lines().count()),
+                    Err(err) => format!("clipboard: {err}"),
+                };
+            }
+        }
+        KeyCode::Char('a') => app.agent_prompt = ai_context(app),
         KeyCode::Char('c') => app.toggle_cluster_menu(),
         KeyCode::Char(']') => app.step_cluster(1),
         KeyCode::Char('[') => app.step_cluster(-1),

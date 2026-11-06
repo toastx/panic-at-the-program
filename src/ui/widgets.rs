@@ -106,7 +106,9 @@ pub fn theme() -> &'static Theme {
 
 /// Applies the theme saved in the global config, if any.
 pub fn load_theme() {
-    let saved = crate::workspace::global("ui").into_iter().find(|(key, _)| key == "theme");
+    let saved = crate::workspace::global("ui")
+        .into_iter()
+        .find(|(key, _)| key == "theme");
     if let Some(index) = saved.and_then(|(_, name)| THEMES.iter().position(|t| t.name == name)) {
         THEME.store(index, Ordering::Relaxed);
     }
@@ -138,15 +140,14 @@ pub fn panel(title: &str, focused: bool) -> Block<'_> {
     }
     block.title(Span::styled(
         format!(" {title} "),
-        Style::new().fg(if focused { theme().accent } else { theme().muted }).bold(),
+        Style::new()
+            .fg(if focused { theme().accent } else { theme().muted })
+            .bold(),
     ))
 }
 
 pub fn chip(text: &str, color: Color) -> Span<'static> {
-    Span::styled(
-        format!(" {text} "),
-        Style::new().fg(color).bg(theme().surface).bold(),
-    )
+    Span::styled(format!(" {text} "), Style::new().fg(color).bg(theme().surface).bold())
 }
 
 pub fn short(key: &str) -> String {
@@ -211,7 +212,11 @@ pub fn delta_bar(ratio: f64, width: usize) -> Vec<Span<'static>> {
             axis,
         ]
     } else {
-        vec![Span::raw(" ".repeat(half)), axis, Span::styled(smooth(cells), Style::new().fg(theme().ok))]
+        vec![
+            Span::raw(" ".repeat(half)),
+            axis,
+            Span::styled(smooth(cells), Style::new().fg(theme().ok)),
+        ]
     }
 }
 
@@ -288,10 +293,7 @@ pub fn render_topbar(f: &mut Frame, area: Rect, app: &mut App) {
         (Kind::Account, _, Some(account)) => {
             spans.extend([
                 Span::raw(format!(" {} ", short(&account.key))),
-                chip(
-                    if account.executable { "program" } else { "account" },
-                    theme().info,
-                ),
+                chip(if account.executable { "program" } else { "account" }, theme().info),
                 Span::styled("  Balance ", muted()),
                 Span::raw(format!("{:.9} SOL", account.lamports as f64 / 1e9)),
                 Span::styled("  Owner ", muted()),

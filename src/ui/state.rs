@@ -127,6 +127,9 @@ pub struct App {
     pub collapsed: HashSet<usize>,
 
     pub mode: Mode,
+    /// Diagnosis waiting to be handed to the AI agent: the loop steps the TUI
+    /// aside for it, which a key handler cannot do on its own.
+    pub agent_prompt: Option<String>,
     pub search: String,
     pub message: String,
     pub scroll: usize,
@@ -158,6 +161,7 @@ impl App {
             list: ListState::default(),
             collapsed: HashSet::new(),
             mode: Mode::Normal,
+            agent_prompt: None,
             search: String::new(),
             message: String::new(),
             scroll: 0,
