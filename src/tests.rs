@@ -541,7 +541,7 @@ fn unknown_codes_are_inferred_from_the_idl_flavor() {
 
     let (headline, _, hint) = diagnose::infer_custom(3, None);
     assert!(headline.contains("custom program error 3"));
-    assert!(hint.contains("number errors from 0"));
+    assert_eq!(hint, diagnose::NO_IDL_HINT);
 }
 
 #[test]
@@ -1977,4 +1977,51 @@ fn run_screen_counts_tests_and_renders_outcome() {
     for expected in ["test · anchor", "2 passed", "SUITE OUTPUT", "1 failed transaction(s) on localnet", "Enter"] {
         assert!(text.contains(expected), "missing {expected:?}");
     }
+}
+
+#[test]
+fn custom_codes_without_an_idl_are_named_from_logs_and_tables() {
+    // Pre-seeded so the unnamed case finds its stub and writes nothing.
+    workspace::use_text("[errors.Vau1t11111111111111111111111111111111111]\n6001 = \"\"\n");
+    let diagnose = |code: u32, program: &str, logs: &[&str]| {
+        let program_logs: Vec<String> = std::iter::once(format!("Program {program} invoke [1]"))
+            .chain(logs.iter().map(|line| format!("Program log: {line}")))
+            .chain([format!("Program {program} failed: custom program error: {code:#x}")])
+            .collect();
+        let mut tx = solana::parse("s", "localnet", &json!({"result": {
+            "slot": 1u64,
+            "meta": {
+                "err": {"InstructionError": [0, {"Custom": code}]},
+                "fee": 5000u64, "computeUnitsConsumed": 100u64,
+                "preBalances": [10u64, 1u64], "postBalances": [10u64, 1u64],
+                "innerInstructions": [], "logMessages": program_logs,
+            },
+            "transaction": {"message": {
+                "header": {"numRequiredSignatures": 1, "numReadonlySignedAccounts": 0, "numReadonlyUnsignedAccounts": 1},
+                "accountKeys": ["Auth1111", program],
+                "instructions": [{"programIdIndex": 1, "accounts": [0], "data": ""}]
+            }}
+        }}));
+        let mut failure = tx.failure.take().expect("failure");
+        idl::name_custom_code(&mut failure, program, code, None, &tx.logs);
+        failure
+    };
+    let vault = "Vau1t11111111111111111111111111111111111";
+
+    // The AnchorError line names it, no IDL required.
+    let failure = diagnose(6000, vault, &[
+        "Instruction: Deposit",
+        "AnchorError thrown in programs/vault/src/lib.rs:20. Error Code: ZeroAmount. Error Number: 6000. Error Message: deposit amount must be greater than zero.",
+    ]);
+    assert_eq!(failure.headline, "ZeroAmount");
+    assert_eq!(failure.meaning, "deposit amount must be greater than zero");
+
+    // A table we ship keeps its name instead of a generic guess.
+    let failure = diagnose(1, "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", &["Instruction: Transfer", "Error: insufficient funds"]);
+    assert_ne!(failure.headline, "custom program error 1");
+
+    // Unnamed anywhere: the program's own last words explain it.
+    let failure = diagnose(6001, vault, &["Instruction: Withdraw", "vault is locked until slot 900"]);
+    assert_eq!(failure.headline, "Anchor user error #1");
+    assert_eq!(failure.meaning, "the program logged: vault is locked until slot 900");
 }

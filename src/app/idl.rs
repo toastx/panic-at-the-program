@@ -712,35 +712,68 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Names a custom error code from the IDL or patp.toml, falling back to what
+/// Names a custom error code: patp.toml first (the user's word), then the
+/// program's own AnchorError log (what the deployed code said), then the IDL,
+/// then our built-in tables. Only when all are silent does it fall back to what
 /// the IDL flavor implies, and infers advice from the name when the program
 /// named the error but not the fix.
-fn name_custom_code(failure: &mut super::diagnose::Failure, program: &str, code: u32, parsed: Option<&Program>) {
+pub(crate) fn name_custom_code(
+    failure: &mut super::diagnose::Failure,
+    program: &str,
+    code: u32,
+    parsed: Option<&Program>,
+    logs: &[String],
+) {
     use super::diagnose::{DiagnosticId, LogId, Note, Tier};
+    use super::errors::{self, anchor};
 
+    let logged = anchor::log(logs);
     let named = crate::workspace::error_label(program, code)
-        .map(|(name, message)| (name, message, true))
+        .map(|(name, message)| (name, message, Some(LogId::NamePatpToml)))
+        .or_else(|| {
+            // Only a name logged with this very number: a stray line proves nothing.
+            let name = logged.name.clone().filter(|_| logged.number == Some(code))?;
+            Some((name, logged.message.clone().unwrap_or_default(), Some(LogId::NameLogged)))
+        })
         .or_else(|| {
             let (name, message) = error(parsed?, code)?;
-            Some((name, message, false))
+            Some((name, message, None))
         });
 
     failure
         .notes
         .retain(|note| note.id != DiagnosticId::Log(LogId::AnchorUserRange));
 
-    let Some((name, message, from_config)) = named else {
+    // Already named by failure() from a table we ship; nothing to guess.
+    let known = errors::solana::program(program, code).is_some()
+        || (errors::anchor_applies(program) && code < anchor::USER_OFFSET && anchor::lookup(code).is_some());
+    if named.is_none() && known {
+        return;
+    }
+
+    let Some((name, message, from)) = named else {
         let (headline, meaning, hint) = super::diagnose::infer_custom(code, parsed.map(|p| p.flavor));
         failure.headline = headline;
-        failure.meaning = meaning;
-        failure
-            .notes
-            .push(Note::new(DiagnosticId::Log(LogId::FlavorInferred), Tier::Note, hint));
-        failure.notes.push(Note::new(
-            DiagnosticId::Log(LogId::NameUnnamed),
-            Tier::Help,
-            format!("name it in patp.toml: [errors.{program}] {code} = \"Name: what it means\""),
-        ));
+        // The program's last words usually say what went wrong, even unnamed.
+        failure.meaning = match last_said(logs) {
+            Some(said) => format!("the program logged: {said}"),
+            None => meaning,
+        };
+        // No IDL: the hint already says where a name can come from, so one line does.
+        if parsed.is_none() {
+            failure
+                .notes
+                .push(Note::new(DiagnosticId::Log(LogId::NameUnnamed), Tier::Help, hint));
+        } else {
+            failure
+                .notes
+                .push(Note::new(DiagnosticId::Log(LogId::FlavorInferred), Tier::Note, hint));
+            failure.notes.push(Note::new(
+                DiagnosticId::Log(LogId::NameUnnamed),
+                Tier::Help,
+                format!("name it in patp.toml: [errors.{program}] {code} = \"Name: what it means\""),
+            ));
+        }
         crate::workspace::record_error_stub(program, code);
         return;
     };
@@ -749,12 +782,13 @@ fn name_custom_code(failure: &mut super::diagnose::Failure, program: &str, code:
     if !message.is_empty() {
         failure.meaning = message;
     }
-    if from_config {
-        failure.notes.push(Note::new(
-            DiagnosticId::Log(LogId::NamePatpToml),
-            Tier::Note,
-            "named by your patp.toml error table".to_string(),
-        ));
+    let source = match from {
+        Some(LogId::NamePatpToml) => Some("named by your patp.toml error table"),
+        Some(LogId::NameLogged) if parsed.is_none() => Some("named by the program's own error log — no IDL needed"),
+        _ => None,
+    };
+    if let (Some(id), Some(text)) = (from, source) {
+        failure.notes.push(Note::new(DiagnosticId::Log(id), Tier::Note, text.to_string()));
     }
     if failure.class.is_none()
         && let Some(class) = super::errors::classify_name(&name)
@@ -766,6 +800,15 @@ fn name_custom_code(failure: &mut super::diagnose::Failure, program: &str, code:
             format!("inferred from the name `{name}` — {}", class.help()),
         ));
     }
+}
+
+/// The last line the program itself logged, skipping Anchor's bookkeeping.
+fn last_said(logs: &[String]) -> Option<&str> {
+    logs.iter()
+        .rev()
+        .filter_map(|line| line.strip_prefix("Program log: "))
+        .map(str::trim)
+        .find(|said| !said.is_empty() && !said.starts_with("Instruction: ") && !said.starts_with("AnchorError"))
 }
 
 pub fn enrich(tx: &mut solana::Tx) {
@@ -787,7 +830,7 @@ pub fn enrich(tx: &mut solana::Tx) {
 
     let Some(failure) = tx.failure.as_mut() else { return };
     if let super::diagnose::Code::Custom(code) = failure.code {
-        name_custom_code(failure, &program, code, parsed.as_deref());
+        name_custom_code(failure, &program, code, parsed.as_deref(), &logs);
     }
 
     let logged = super::diagnose::log_notes(&failure.code, &logs, cu, limit);

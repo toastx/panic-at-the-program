@@ -2,6 +2,8 @@
 
 use crate::app::errors::anchor;
 
+pub const NO_IDL_HINT: &str = "add the program's IDL to target/idl, or name the code in patp.toml";
+
 /// Names an unknown custom code from what the IDL flavor implies.
 pub fn infer_custom(code: u32, flavor: Option<crate::app::idl::Flavor>) -> (String, String, String) {
     use crate::app::idl::Flavor;
@@ -34,13 +36,13 @@ pub fn infer_custom(code: u32, flavor: Option<crate::app::idl::Flavor>) -> (Stri
         ),
         None if code >= anchor::USER_OFFSET => (
             format!("Anchor user error #{}", code - anchor::USER_OFFSET),
-            "the 6000 range is Anchor's user-defined block".to_string(),
-            "no IDL found for this program — drop one in target/idl or point at it from patp.toml".to_string(),
+            "a custom error from the program, unnamed without its IDL".to_string(),
+            NO_IDL_HINT.to_string(),
         ),
         None => (
             format!("custom program error {code}"),
-            "no IDL and no known error table for this program".to_string(),
-            "programs outside Anchor usually number errors from 0, so this is likely their enum index".to_string(),
+            "a custom error from the program, unnamed without its IDL".to_string(),
+            NO_IDL_HINT.to_string(),
         ),
     }
 }
