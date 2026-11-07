@@ -83,9 +83,13 @@ pub fn available(program: &str) -> bool {
         .is_ok()
 }
 
-/// Combined stdout+stderr: frameworks split program logs across both.
-pub fn run(root: &Path, command: &[String]) -> std::io::Result<String> {
-    let output = Command::new(&command[0])
+/// The running suite, so quitting the run screen can kill it.
+static SUITE: Mutex<Option<Child>> = Mutex::new(None);
+
+/// Combined stdout+stderr: frameworks split program logs across both. Each line
+/// also goes to `on_line` as it arrives, interleaved in the order it was read.
+pub fn run(root: &Path, command: &[String], on_line: &(dyn Fn(&str) + Sync)) -> std::io::Result<String> {
+    let mut child = Command::new(&command[0])
         .args(&command[1..])
         .current_dir(root)
         // litesvm / solana-program-test only emit program logs at this level.
@@ -93,12 +97,38 @@ pub fn run(root: &Path, command: &[String]) -> std::io::Result<String> {
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "solana_runtime::message_processor=debug".to_string()),
         )
-        .output()?;
-    Ok(format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    ))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+    *SUITE.lock().expect("suite lock") = Some(child);
+
+    fn drain(pipe: Option<impl std::io::Read>, on_line: &(dyn Fn(&str) + Sync)) -> String {
+        use std::io::BufRead;
+        let mut all = String::new();
+        let Some(pipe) = pipe else { return all };
+        for line in std::io::BufReader::new(pipe).split(b'\n').map_while(Result::ok) {
+            let line = String::from_utf8_lossy(&line);
+            on_line(line.trim_end_matches('\r'));
+            all.push_str(&line);
+            all.push('\n');
+        }
+        all
+    }
+    let (out, err) = std::thread::scope(|scope| {
+        let err = scope.spawn(|| drain(stderr, on_line));
+        (drain(stdout, on_line), err.join().unwrap_or_default())
+    });
+    if let Some(mut child) = SUITE.lock().expect("suite lock").take() {
+        child.wait()?;
+    }
+    Ok(format!("{out}{err}"))
+}
+
+/// Kills the suite if it is still running.
+pub fn abort() {
+    kill(&SUITE);
 }
 
 pub struct Validator(Arc<Mutex<Option<Child>>>);
@@ -119,7 +149,6 @@ impl Validator {
     pub fn start(root: &Path) -> std::io::Result<Option<Self>> {
         let wallet = wallet(root);
         if crate::app::solana::healthy("localnet") {
-            eprintln!("reusing the validator already serving localnet");
             if let Some(wallet) = &wallet {
                 crate::app::solana::airdrop("localnet", wallet, TOP_UP);
             }
@@ -156,6 +185,11 @@ impl Validator {
             std::thread::sleep(std::time::Duration::from_millis(300));
         }
         Err(std::io::Error::other("solana-test-validator never became healthy"))
+    }
+
+    /// True when it is someone else's validator, already up before we looked.
+    pub fn reused(&self) -> bool {
+        self.0.lock().expect("validator lock").is_none()
     }
 
     /// Kills it `secs` from now, in the background.

@@ -17,6 +17,7 @@ use ratatui::prelude::*;
 
 use app::solana;
 use suite::tap as rpc_tap;
+use ui::run::{Outcome, Run};
 use ui::state::{App, Mode, Screen, clusters};
 
 fn main() -> io::Result<()> {
@@ -29,21 +30,8 @@ fn main() -> io::Result<()> {
         return ai_command(&args.collect::<Vec<_>>());
     }
 
-    // Held until the TUI exits: dropping it kills the validator we started.
-    let mut _validator = None;
-    let mut app = if signature.as_deref() == Some("test") {
-        match test_command(&mut _validator)? {
-            Some(app) => app,
-            None => return Ok(()),
-        }
-    } else {
-        let cluster = args.next().unwrap_or_else(|| "devnet".to_string());
-        let mut app = App::new(cluster);
-        if let Some(signature) = &signature {
-            app.open(signature);
-        }
-        app
-    };
+    let suite = (signature.as_deref() == Some("test")).then(prepare_suite);
+    let verbose = suite.is_some() && args.any(|arg| arg == "--verbose");
 
     if !ai::configured() {
         ai::setup()?;
@@ -54,6 +42,30 @@ fn main() -> io::Result<()> {
     let mut out = io::stdout();
     execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
     let mut term = Terminal::new(CrosstermBackend::new(out))?;
+
+    // Held until the TUI exits: dropping it kills the validator we started.
+    let mut _validator = None;
+    let mut app = match suite {
+        Some((root, framework, command)) => match test_screen(&mut term, root, framework, command, verbose, &mut _validator)? {
+            Ok(app) => app,
+            Err(report) => {
+                leave(&mut term)?;
+                // Left in the scrollback, the way a plain `anchor test` would.
+                for line in report {
+                    eprintln!("{line}");
+                }
+                return Ok(());
+            }
+        },
+        None => {
+            let cluster = args.next().unwrap_or_else(|| "devnet".to_string());
+            let mut app = App::new(cluster);
+            if let Some(signature) = &signature {
+                app.open(signature);
+            }
+            app
+        }
+    };
 
     while !app.quit {
         term.draw(|f| ui::screens::draw(f, &mut app))?;
@@ -76,16 +88,19 @@ fn main() -> io::Result<()> {
         }
     }
 
+    leave(&mut term)
+}
+
+fn leave(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
     disable_raw_mode()?;
     execute!(term.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     term.show_cursor()
 }
 
-/// Runs the project's suite and opens the TUI on the first failed transaction
-/// found in its output. None means there was nothing to open.
-fn test_command(validator: &mut Option<suite::Validator>) -> io::Result<Option<App>> {
+/// The suite to run, or exit: checks that need no screen, done before there is one.
+fn prepare_suite() -> (std::path::PathBuf, suite::Framework, Vec<String>) {
     let root = workspace::project_root().unwrap_or_default();
-    let Some((framework, mut command)) = suite::detect(&root) else {
+    let Some((framework, command)) = suite::detect(&root) else {
         eprintln!(
             "no test suite found in {} (looked for Anchor.toml, Cargo.toml)",
             root.display()
@@ -102,40 +117,181 @@ fn test_command(validator: &mut Option<suite::Validator>) -> io::Result<Option<A
         }
         std::process::exit(2);
     }
-    if framework == suite::Framework::Anchor {
-        *validator = suite::Validator::start(&root)?;
-        if validator.is_none() {
-            eprintln!("solana-test-validator not on PATH — install it to keep failed transactions fetchable");
-            return Ok(None);
+    (root, framework, command)
+}
+
+/// What the suite thread tells the run screen.
+enum Progress {
+    Step(String),
+    Note(String),
+    Log(String),
+    /// Ours to hold, so quitting at any point still shuts it down.
+    Validator(suite::Validator),
+    Done(Outcome),
+}
+
+/// Runs the suite behind the run screen. Ok(app) opens the TUI on the latest
+/// failed transaction; Err(report) is what to print once the screen is gone.
+fn test_screen(
+    term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    root: std::path::PathBuf,
+    framework: suite::Framework,
+    command: Vec<String>,
+    verbose: bool,
+    validator: &mut Option<suite::Validator>,
+) -> io::Result<Result<App, Vec<String>>> {
+    let mut run = Run::new(framework.to_string(), verbose);
+    let (sender, progress) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let send = |message| drop(sender.send(message));
+        let outcome = run_suite(&root, framework, command, &send);
+        send(Progress::Done(outcome));
+    });
+
+    loop {
+        loop {
+            let message = match progress.try_recv() {
+                Ok(message) => message,
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    if run.outcome.is_none() {
+                        run.finish(Outcome::Error("the test runner stopped unexpectedly".to_string()));
+                    }
+                    break;
+                }
+            };
+            match message {
+                Progress::Step(text) => run.step(text),
+                Progress::Note(text) => run.note(text),
+                Progress::Log(line) => run.log(&line),
+                Progress::Validator(v) => *validator = Some(v),
+                Progress::Done(outcome) => {
+                    // Only a transaction still on localnet needs it; give the TUI a while.
+                    if let Some(v) = validator.as_ref() {
+                        match &outcome {
+                            Outcome::Open { cluster: "localnet", .. } => v.expire_after(suite::TTL),
+                            _ => v.stop(),
+                        }
+                    }
+                    run.finish(outcome);
+                }
+            }
         }
-        eprintln!("validator up on localnet");
+        if !verbose && let Some(Outcome::Open { cluster, keys }) = &run.outcome {
+            return Ok(Ok(open_failure(cluster, keys)));
+        }
+
+        term.draw(|f| ui::run::draw(f, &run))?;
+        if !event::poll(std::time::Duration::from_millis(80))? {
+            continue;
+        }
+        let key = match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => key,
+            Event::Mouse(mouse) => {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => run.scroll_by(3),
+                    MouseEventKind::ScrollDown => run.scroll_by(-3),
+                    _ => {}
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => break,
+            _ if ctrl_c => break,
+            KeyCode::Enter => {
+                if let Some(Outcome::Open { cluster, keys }) = &run.outcome {
+                    return Ok(Ok(open_failure(cluster, keys)));
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => run.scroll_by(1),
+            KeyCode::Down | KeyCode::Char('j') => run.scroll_by(-1),
+            KeyCode::PageUp => run.scroll_by(20),
+            KeyCode::PageDown => run.scroll_by(-20),
+            KeyCode::Char('g') => run.scroll_by(isize::MAX),
+            KeyCode::Char('G') => run.scroll = 0,
+            _ => {}
+        }
+    }
+
+    suite::abort();
+    Ok(Err(match run.outcome {
+        None => vec!["aborted".to_string()],
+        Some(Outcome::Open { .. }) => Vec::new(),
+        Some(Outcome::Error(err)) => vec![err],
+        Some(Outcome::Nothing(text)) => run.logs.into_iter().chain(text).collect(),
+    }))
+}
+
+fn open_failure(cluster: &str, keys: &[String]) -> App {
+    let mut app = App::new(cluster.to_string());
+    if let Some(key) = keys.last() {
+        app.open_transaction(key);
+    }
+    app
+}
+
+/// Runs the project's suite and finds the failed transactions in what it did.
+fn run_suite(
+    root: &std::path::Path,
+    framework: suite::Framework,
+    mut command: Vec<String>,
+    send: &(dyn Fn(Progress) + Sync),
+) -> Outcome {
+    let note = |text: String| send(Progress::Note(text));
+    let mut have_validator = false;
+    if framework == suite::Framework::Anchor {
+        send(Progress::Step("starting solana-test-validator".to_string()));
+        match suite::Validator::start(root) {
+            Ok(Some(validator)) => {
+                note(match validator.reused() {
+                    true => "reusing the validator already serving localnet".to_string(),
+                    false => "validator up on localnet".to_string(),
+                });
+                send(Progress::Validator(validator));
+                have_validator = true;
+            }
+            Ok(None) => {
+                return Outcome::Error(
+                    "solana-test-validator not on PATH — install it to keep failed transactions fetchable".to_string(),
+                );
+            }
+            Err(err) => return Outcome::Error(err.to_string()),
+        }
     }
 
     // With the suite pointed at the tap we hear what the validator told it. Its
     // own output is a lossy witness: anchor's client throws the simulation result
     // away and mocha prints a sentence.
-    let tap = validator
-        .as_ref()
-        .and_then(|_| rpc_tap::upstreams(&solana::cluster_url("localnet")))
+    let tap = have_validator
+        .then(|| rpc_tap::upstreams(&solana::cluster_url("localnet")))
+        .flatten()
         .and_then(|(http, ws)| rpc_tap::Tap::start(&http, &ws).ok());
     match (&tap, command.iter().position(|arg| arg == suite::CLUSTER_ARG)) {
         (Some(tap), Some(at)) => {
             command[at] = tap.url();
-            eprintln!("rpc tap on {}", tap.url());
+            note(format!("rpc tap on {}", tap.url()));
         }
         // Without the tap the suite talks to the validator directly and we are
         // back to scraping its output.
-        _ => eprintln!("no rpc tap — falling back to the suite's own output"),
+        _ => note("no rpc tap — falling back to the suite's own output".to_string()),
     }
-    eprintln!("{framework}: {} (in {})", command.join(" "), root.display());
 
-    let output = suite::run(&root, &command)
-        .map_err(|err| io::Error::new(err.kind(), format!("could not run `{}`: {err}", command[0])))?;
+    send(Progress::Step(format!("{framework}: {}", command.join(" "))));
+    note(format!("in {}", root.display()));
+    let output = match suite::run(root, &command, &|line| send(Progress::Log(line.to_string()))) {
+        Ok(output) => output,
+        Err(err) => return Outcome::Error(format!("could not run `{}`: {err}", command[0])),
+    };
+
+    send(Progress::Step("looking for failed transactions".to_string()));
     // Our own validator is still up, so prefer the real transaction over the one
     // reconstructed from log lines: it carries accounts, balances and state diff.
-    let (cluster, keys) = match validator {
-        Some(_) => ("localnet", suite::failed_signatures(&output, "localnet")),
-        None => (suite::CLUSTER, Vec::new()),
+    let (cluster, keys) = match have_validator {
+        true => ("localnet", suite::failed_signatures(&output, "localnet")),
+        false => (suite::CLUSTER, Vec::new()),
     };
     let (cluster, keys) = if keys.is_empty() {
         // Best evidence first: what the validator said, then program logs the
@@ -145,7 +301,7 @@ fn test_command(validator: &mut Option<suite::Validator>) -> io::Result<Option<A
             .map(|tap| suite::captured(&tap.failures()))
             .unwrap_or_default();
         let mut source = "the rpc tap";
-        if validator.is_some() {
+        if have_validator {
             // Still up, so the payer's balance is still readable.
             suite::add_payer_balance(&mut cases, "localnet");
         }
@@ -154,50 +310,33 @@ fn test_command(validator: &mut Option<suite::Validator>) -> io::Result<Option<A
             source = "program logs in the suite output";
         }
         if !cases.is_empty() {
-            eprintln!("{} case(s) from {source}", cases.len());
+            note(format!("{} case(s) from {source}", cases.len()));
         }
         (suite::CLUSTER, suite::stash(&cases))
     } else {
         (cluster, keys)
     };
 
-    // Nothing more will be fetched off localnet once we fall back to the cases
-    // rebuilt from log lines, so the validator has no reason to stay up.
-    if let Some(validator) = validator.as_ref() {
-        if cluster == suite::CLUSTER {
-            validator.stop();
-        } else {
-            validator.expire_after(suite::TTL);
-        }
+    if !keys.is_empty() {
+        return Outcome::Open { cluster, keys };
     }
-
-    let Some(key) = keys.last().cloned() else {
-        print!("{output}");
-        // A build that fails never reaches the tests, so there is nothing to
-        // diagnose for a reason the generic message would hide.
-        match suite::setup_error(&output) {
-            Some(setup) => {
-                match setup.stage {
-                    suite::Stage::Compile => {
-                        let plural = if setup.count == 1 { "error" } else { "errors" };
-                        eprintln!("the build failed with {} {plural} — the suite never ran", setup.count);
-                    }
-                    suite::Stage::Startup => eprintln!("the suite stopped before any test ran"),
+    // A build that fails never reaches the tests, so there is nothing to
+    // diagnose for a reason the generic message would hide.
+    Outcome::Nothing(match suite::setup_error(&output) {
+        Some(setup) => {
+            let mut text = vec![match setup.stage {
+                suite::Stage::Compile => {
+                    let plural = if setup.count == 1 { "error" } else { "errors" };
+                    format!("the build failed with {} {plural} — the suite never ran", setup.count)
                 }
-                eprintln!("  {}", setup.headline);
-                if let Some(location) = &setup.location {
-                    eprintln!("  at {location}");
-                }
-            }
-            None => eprintln!("no failed transaction in the output — nothing to diagnose"),
+                suite::Stage::Startup => "the suite stopped before any test ran".to_string(),
+            }];
+            text.push(format!("  {}", setup.headline));
+            text.extend(setup.location.as_ref().map(|location| format!("  at {location}")));
+            text
         }
-        return Ok(None);
-    };
-    eprintln!("{} failed transaction(s) on {cluster}", keys.len());
-
-    let mut app = App::new(cluster.to_string());
-    app.open_transaction(&key);
-    Ok(Some(app))
+        None => vec!["no failed transaction in the output — nothing to diagnose".to_string()],
+    })
 }
 
 fn rpc_command(args: &[String]) -> io::Result<()> {

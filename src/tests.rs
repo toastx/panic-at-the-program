@@ -1949,3 +1949,32 @@ fn bars_draw_eighths_and_diverge_from_zero() {
     // A tiny nonzero change still shows, so it never reads as no change.
     assert_eq!(text(delta_bar(-0.001, 11)), "    █│");
 }
+
+#[test]
+fn run_screen_counts_tests_and_renders_outcome() {
+    use crate::ui::run::{Outcome, Run};
+    let mut run = Run::new("anchor".into(), true);
+    run.step("anchor: anchor test".into());
+    for line in [
+        "\x1b[32m    ✔ initializes (412ms)\x1b[0m",
+        "    1) rejects a bad signer",
+        "test tests::ok_path ... ok",
+        "test tests::bad_path ... FAILED",
+        "  1) suite",
+        "\tindented",
+    ] {
+        run.log(line);
+    }
+    assert_eq!((run.passed, run.failed), (2, 1 + 1));
+    assert_eq!(run.logs[0], "    ✔ initializes (412ms)");
+    assert_eq!(run.logs[5], "    indented");
+
+    run.finish(Outcome::Open { cluster: "localnet", keys: vec!["sig".into()] });
+    let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    term.draw(|f| crate::ui::run::draw(f, &run)).unwrap();
+    let buffer = term.backend().buffer();
+    let text: String = buffer.content.iter().map(|c| c.symbol()).collect();
+    for expected in ["test · anchor", "2 passed", "SUITE OUTPUT", "1 failed transaction(s) on localnet", "Enter"] {
+        assert!(text.contains(expected), "missing {expected:?}");
+    }
+}

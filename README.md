@@ -37,11 +37,12 @@ panic <signature>              # open a transaction
 panic <pubkey>                 # open an account
 panic <signature|pubkey> mainnet   # pick a cluster (mainnet, devnet, testnet, localnet, or a custom name)
 panic test                     # run the project's test suite and open its first failure
+panic test --verbose           # same, streaming the suite's output; Enter opens the failure
 ```
 
 ### From the test suite
 
-`panic test` finds the suite (`Anchor.toml` → `anchor test`, otherwise `cargo test`), runs it, and opens the TUI on a failed transaction from its output.
+`panic test` finds the suite (`Anchor.toml` → `anchor test`, otherwise `cargo test`), runs it, and opens the TUI on a failed transaction from its output. While it runs, a progress screen shows each step, live pass/fail counts and the latest output line; `q` aborts. With `--verbose` it shows the full suite output (scroll with ↑↓/PgUp/PgDn, `G` to follow) and waits for Enter before opening the failure. If there is nothing to diagnose, the output and the reason stay on screen and are printed when you quit.
 
 For Anchor it starts `solana-test-validator` itself and runs `anchor test --skip-local-validator`, so the failed transaction is still on the validator afterwards and opens with its accounts, balances and state diff. The validator is killed when you quit. An already-running localnet is reused instead of starting a second one.
 
