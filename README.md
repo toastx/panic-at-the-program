@@ -60,7 +60,7 @@ Custom endpoints live in `~/.config/panic/config.toml` and show up in the cluste
 
 ### AI agent export
 
-The first time the TUI opens it asks whether to enable AI export, and which agent to hand a diagnosis to (`claude` by default; `codex`, `gemini`, `opencode` work the same way). The answer is remembered in `~/.config/panic/config.toml`:
+The first time the TUI opens, a popup asks once whether to enable AI export; the answer is saved either way in `~/.config/panic/config.toml`. Said no? Press `a` later to turn it on.
 
 ```toml
 [ai]
@@ -71,12 +71,13 @@ agent = "claude"
 ```sh
 panic ai                       # show the current setting
 panic ai on | off              # enable or disable it
-panic ai agent codex           # hand diagnoses to a different agent
+panic ai agent codex           # hand diagnoses to a different agent (default: claude)
 ```
 
-On a transaction, `y` copies the diagnosis as markdown — the error and what it means, the notes with their tiers, the failing instruction, the CPI tree with compute units, the failing frame's logs, and the account list. The copy goes through an OSC 52 escape, so it reaches your clipboard over SSH too.
+On a transaction, `a` opens a menu:
 
-`a` hands the same markdown to the agent as its opening prompt. `panic` steps aside, the agent runs in this terminal, and the TUI comes back when it exits — no second window, nothing to configure per terminal emulator.
+- `c` copies the diagnosis as markdown — the error and what it means, the notes with their tiers, the failing instruction, the CPI tree with compute units, the failing frame's logs, and the account list. The copy goes through an OSC 52 escape, so it reaches your clipboard over SSH too.
+- `o` opens your agent in a new terminal window with that markdown as its opening prompt, in the directory you ran `panic` from. The TUI stays open. tmux, WezTerm, Ghostty, kitty, iTerm and Terminal.app are supported, plus `x-terminal-emulator` / `gnome-terminal` on Linux; anywhere else it copies the diagnosis instead.
 
 ## What you get
 
@@ -106,8 +107,7 @@ A transaction opens into a set of screens: **Overview**, **Execution** (weighted
 | `c` / `[` `]` | Cluster menu / previous, next cluster |
 | `r` | Refetch |
 | `x` | Open in explorer |
-| `y` | Copy the diagnosis as AI context |
-| `a` | Send the diagnosis to your AI agent |
+| `a` | AI export: copy the diagnosis, or open it in your agent |
 | `?` | Help |
 | `q` | Quit |
 

@@ -49,8 +49,61 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.cluster_menu {
         render_cluster_menu(f, app);
     }
-    if matches!(app.mode, Mode::Help) {
-        help(f, f.area());
+    match app.mode {
+        Mode::Help => help(f, f.area()),
+        Mode::AiSetup => dialog(
+            f,
+            "AI EXPORT",
+            &[
+                "Hand a failed transaction's diagnosis to an AI",
+                "agent (claude, codex, ...) with one key?",
+                "",
+                "y  enable        n  not now",
+                "",
+                "Asked once. Press 'a' later to turn it on;",
+                "panic ai agent <cmd> picks the agent.",
+            ],
+        ),
+        Mode::Ai => {
+            let agent = crate::ai::agent().unwrap_or_default();
+            dialog(
+                f,
+                "AI EXPORT",
+                &[
+                    "c  copy the diagnosis to paste anywhere",
+                    &format!("o  open {agent} in a new window with it"),
+                    "",
+                    "Esc  cancel",
+                ],
+            )
+        }
+        _ => {}
+    }
+}
+
+/// A small centred popup of plain lines.
+fn dialog(f: &mut Frame, title: &str, lines: &[&str]) {
+    let area = f.area();
+    let popup = centered(area, 54, lines.len() as u16 + 4);
+    f.render_widget(Clear, popup);
+    let block = panel(title, true).padding(Padding::uniform(1));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+    let text: Vec<Line> = lines
+        .iter()
+        .map(|line| Line::styled(line.to_string(), muted()))
+        .collect();
+    f.render_widget(Paragraph::new(text), inner);
+}
+
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: (area.width - width) / 2,
+        y: (area.height - height) / 2,
+        width,
+        height,
     }
 }
 
@@ -1419,14 +1472,7 @@ fn account_data(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn help(f: &mut Frame, area: Rect) {
-    let width = 54.min(area.width);
-    let height = 18.min(area.height);
-    let popup = Rect {
-        x: (area.width - width) / 2,
-        y: (area.height - height) / 2,
-        width,
-        height,
-    };
+    let popup = centered(area, 54, 17);
     f.render_widget(Clear, popup);
     let block = panel("HELP", true);
     let inner = block.inner(popup);
@@ -1444,8 +1490,7 @@ fn help(f: &mut Frame, area: Rect) {
         ("o", "open a transaction signature"),
         ("r", "refetch, bypassing cache"),
         ("t", "cycle theme: dark · light · mono"),
-        ("y", "copy the diagnosis as AI context"),
-        ("a", "send the diagnosis to your AI agent"),
+        ("a", "AI export: copy, or open in your agent"),
         ("g / G", "jump to top / bottom"),
         ("? / Esc", "toggle help / cancel"),
         ("q", "quit"),

@@ -1,8 +1,8 @@
 //! Handing a diagnosis to an AI coding agent: the markdown context, the
-//! clipboard escape, and the agent command itself.
+//! clipboard escape, and a new terminal window running the agent.
 
-use std::io::{self, BufRead, Write};
-use std::process::Command;
+use std::io::{self, Write};
+use std::process::{Command, Stdio};
 
 use crate::app::diagnose::{Confidence, Failure, Tier};
 use crate::app::solana::{Node, Status, Tx, base64_encode};
@@ -33,41 +33,13 @@ pub fn agent() -> Option<String> {
 }
 
 /// The binary to look for on PATH: `codex exec` is still `codex`.
-pub fn program(agent: &str) -> &str {
+fn program(agent: &str) -> &str {
     agent.split_whitespace().next().unwrap_or(agent)
 }
 
-/// The one-time opt-in, asked on stdin before the TUI takes the screen.
-pub fn setup() -> io::Result<()> {
-    // No one at the keyboard (piped stdin): leave it unanswered and ask again
-    // rather than opting the user out on their behalf.
-    let Some(answer) = ask("enable AI agent export? [y/n] ")? else {
-        return Ok(());
-    };
-    if !answer.to_lowercase().starts_with('y') {
-        return workspace::set_global("ai", "enabled", "false");
-    }
-    let agent = ask(&format!(
-        "agent command [{DEFAULT_AGENT}] (e.g. codex, gemini, opencode): "
-    ))?
-    .filter(|line| !line.is_empty())
-    .unwrap_or_else(|| DEFAULT_AGENT.to_string());
-    workspace::set_global("ai", "enabled", "true")?;
-    workspace::set_global("ai", "agent", &agent)?;
-    println!("saved agent \"{agent}\" in {}", workspace::global_path().display());
-    Ok(())
-}
-
-/// A trimmed line from stdin, or None at EOF.
-fn ask(prompt: &str) -> io::Result<Option<String>> {
-    print!("{prompt}");
-    io::stdout().flush()?;
-    let mut line = String::new();
-    if io::stdin().lock().read_line(&mut line)? == 0 {
-        println!();
-        return Ok(None);
-    }
-    Ok(Some(line.trim().to_string()))
+/// Records the one-time opt-in answer from the TUI's first-run dialog.
+pub fn set_enabled(enabled: bool) -> io::Result<()> {
+    workspace::set_global("ai", "enabled", if enabled { "true" } else { "false" })
 }
 
 /// Copies through OSC 52, which the terminal forwards to the system clipboard —
@@ -78,11 +50,105 @@ pub fn copy(text: &str) -> io::Result<()> {
     out.flush()
 }
 
-/// Runs the agent with the context as its prompt, in this terminal.
-pub fn send(agent: &str, prompt: &str) -> io::Result<()> {
-    let mut parts = agent.split_whitespace();
-    let binary = parts.next().unwrap_or(DEFAULT_AGENT);
-    Command::new(binary).args(parts).arg(prompt).status().map(drop)
+/// Opens the agent in a new terminal window, with the context as its opening
+/// prompt, and leaves the TUI where it is. Returns where it opened.
+pub fn open(agent: &str, prompt: &str) -> io::Result<&'static str> {
+    if !on_path(program(agent)) {
+        return Err(io::Error::other(format!("`{}` not on PATH", program(agent))));
+    }
+    let dir = std::env::temp_dir();
+    let context = dir.join("panic-context.md");
+    let launcher = dir.join("panic-agent.command");
+    std::fs::write(&context, prompt)?;
+    let cwd = std::env::current_dir()?;
+    std::fs::write(
+        &launcher,
+        script(agent, &cwd.to_string_lossy(), &context.to_string_lossy()),
+    )?;
+    let launcher = launcher.to_string_lossy().into_owned();
+    let (name, mut command) = terminal(&launcher).ok_or_else(|| io::Error::other("no supported terminal found"))?;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| name)
+}
+
+/// The shell script the new window runs: back to this directory, then the agent.
+pub fn script(agent: &str, cwd: &str, context: &str) -> String {
+    format!(
+        "#!/bin/sh\ncd {}\nexec {agent} \"$(cat {})\"\n",
+        quote(cwd),
+        quote(context)
+    )
+}
+
+/// Single-quoted for sh: a `'` inside closes, escapes, and reopens.
+fn quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// The terminal we are running in, asked for a new window running `launcher`.
+// ponytail: no Windows launcher yet (wt + a .ps1); `open` errors and the caller copies instead.
+fn terminal(launcher: &str) -> Option<(&'static str, Command)> {
+    let env = |key: &str| std::env::var(key).unwrap_or_default();
+    let with = |program: &str, args: &[&str]| {
+        let mut command = Command::new(program);
+        command.args(args);
+        command
+    };
+    if !env("TMUX").is_empty() {
+        return Some(("tmux", with("tmux", &["new-window", "sh", launcher])));
+    }
+    let mac = cfg!(target_os = "macos");
+    Some(match env("TERM_PROGRAM").as_str() {
+        "WezTerm" => ("WezTerm", with("wezterm", &["start", "--", "sh", launcher])),
+        "ghostty" if mac => (
+            "Ghostty",
+            with("open", &["-na", "Ghostty", "--args", "-e", "sh", launcher]),
+        ),
+        "ghostty" => ("Ghostty", with("ghostty", &["-e", "sh", launcher])),
+        "iTerm.app" => (
+            "iTerm",
+            with(
+                "osascript",
+                &[
+                    "-e",
+                    &format!(
+                        "tell application \"iTerm\" to create window with default profile command \"sh {launcher}\""
+                    ),
+                ],
+            ),
+        ),
+        _ if !env("KITTY_WINDOW_ID").is_empty() => ("kitty", with("kitty", &["sh", launcher])),
+        _ if mac => {
+            // Terminal.app runs an executable `.command` file it is asked to open.
+            executable(launcher).ok()?;
+            ("Terminal", with("open", &["-a", "Terminal", launcher]))
+        }
+        _ if cfg!(unix) && on_path("x-terminal-emulator") => {
+            ("terminal", with("x-terminal-emulator", &["-e", "sh", launcher]))
+        }
+        _ if cfg!(unix) => ("gnome-terminal", with("gnome-terminal", &["--", "sh", launcher])),
+        _ => return None,
+    })
+}
+
+#[cfg(unix)]
+fn executable(path: &str) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+}
+
+#[cfg(not(unix))]
+fn executable(_: &str) -> io::Result<()> {
+    Ok(())
+}
+
+/// Found on PATH, without running it: `--version` on a terminal can open a window.
+fn on_path(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
 }
 
 /// What the agent gets: the transaction, our diagnosis, the call tree, the logs

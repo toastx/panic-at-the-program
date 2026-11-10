@@ -733,7 +733,11 @@ pub(crate) fn name_custom_code(
         .or_else(|| {
             // Only a name logged with this very number: a stray line proves nothing.
             let name = logged.name.clone().filter(|_| logged.number == Some(code))?;
-            Some((name, logged.message.clone().unwrap_or_default(), Some(LogId::NameLogged)))
+            Some((
+                name,
+                logged.message.clone().unwrap_or_default(),
+                Some(LogId::NameLogged),
+            ))
         })
         .or_else(|| {
             let (name, message) = error(parsed?, code)?;
@@ -788,7 +792,9 @@ pub(crate) fn name_custom_code(
         _ => None,
     };
     if let (Some(id), Some(text)) = (from, source) {
-        failure.notes.push(Note::new(DiagnosticId::Log(id), Tier::Note, text.to_string()));
+        failure
+            .notes
+            .push(Note::new(DiagnosticId::Log(id), Tier::Note, text.to_string()));
     }
     if failure.class.is_none()
         && let Some(class) = super::errors::classify_name(&name)

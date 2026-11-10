@@ -1876,6 +1876,18 @@ fn ai_context_carries_the_diagnosis_tree_and_accounts() {
 }
 
 #[test]
+fn agent_script_quotes_paths_for_sh() {
+    let script = ai::script("codex exec", "/work/it's here", "/tmp/panic-context.md");
+    // A `'` in the directory must not end the quoted path early.
+    assert!(script.contains("cd '/work/it'\\''s here'\n"), "{script}");
+    // The agent's own arguments stay words; the context is one quoted argument.
+    assert!(
+        script.contains("exec codex exec \"$(cat '/tmp/panic-context.md')\""),
+        "{script}"
+    );
+}
+
+#[test]
 fn uncased_error_names_terminate() {
     // word_end used to return `start` for alphanumerics that are neither upper
     // nor lower case, so tokenize looped forever pushing empty strings. Reachable
@@ -1969,12 +1981,21 @@ fn run_screen_counts_tests_and_renders_outcome() {
     assert_eq!(run.logs[0], "    ✔ initializes (412ms)");
     assert_eq!(run.logs[5], "    indented");
 
-    run.finish(Outcome::Open { cluster: "localnet", keys: vec!["sig".into()] });
+    run.finish(Outcome::Open {
+        cluster: "localnet",
+        keys: vec!["sig".into()],
+    });
     let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
     term.draw(|f| crate::ui::run::draw(f, &run)).unwrap();
     let buffer = term.backend().buffer();
     let text: String = buffer.content.iter().map(|c| c.symbol()).collect();
-    for expected in ["test · anchor", "2 passed", "SUITE OUTPUT", "1 failed transaction(s) on localnet", "Enter"] {
+    for expected in [
+        "test · anchor",
+        "2 passed",
+        "SUITE OUTPUT",
+        "1 failed transaction(s) on localnet",
+        "Enter",
+    ] {
         assert!(text.contains(expected), "missing {expected:?}");
     }
 }
@@ -1988,20 +2009,24 @@ fn custom_codes_without_an_idl_are_named_from_logs_and_tables() {
             .chain(logs.iter().map(|line| format!("Program log: {line}")))
             .chain([format!("Program {program} failed: custom program error: {code:#x}")])
             .collect();
-        let mut tx = solana::parse("s", "localnet", &json!({"result": {
-            "slot": 1u64,
-            "meta": {
-                "err": {"InstructionError": [0, {"Custom": code}]},
-                "fee": 5000u64, "computeUnitsConsumed": 100u64,
-                "preBalances": [10u64, 1u64], "postBalances": [10u64, 1u64],
-                "innerInstructions": [], "logMessages": program_logs,
-            },
-            "transaction": {"message": {
-                "header": {"numRequiredSignatures": 1, "numReadonlySignedAccounts": 0, "numReadonlyUnsignedAccounts": 1},
-                "accountKeys": ["Auth1111", program],
-                "instructions": [{"programIdIndex": 1, "accounts": [0], "data": ""}]
-            }}
-        }}));
+        let mut tx = solana::parse(
+            "s",
+            "localnet",
+            &json!({"result": {
+                "slot": 1u64,
+                "meta": {
+                    "err": {"InstructionError": [0, {"Custom": code}]},
+                    "fee": 5000u64, "computeUnitsConsumed": 100u64,
+                    "preBalances": [10u64, 1u64], "postBalances": [10u64, 1u64],
+                    "innerInstructions": [], "logMessages": program_logs,
+                },
+                "transaction": {"message": {
+                    "header": {"numRequiredSignatures": 1, "numReadonlySignedAccounts": 0, "numReadonlyUnsignedAccounts": 1},
+                    "accountKeys": ["Auth1111", program],
+                    "instructions": [{"programIdIndex": 1, "accounts": [0], "data": ""}]
+                }}
+            }}),
+        );
         let mut failure = tx.failure.take().expect("failure");
         idl::name_custom_code(&mut failure, program, code, None, &tx.logs);
         failure
@@ -2009,19 +2034,31 @@ fn custom_codes_without_an_idl_are_named_from_logs_and_tables() {
     let vault = "Vau1t11111111111111111111111111111111111";
 
     // The AnchorError line names it, no IDL required.
-    let failure = diagnose(6000, vault, &[
-        "Instruction: Deposit",
-        "AnchorError thrown in programs/vault/src/lib.rs:20. Error Code: ZeroAmount. Error Number: 6000. Error Message: deposit amount must be greater than zero.",
-    ]);
+    let failure = diagnose(
+        6000,
+        vault,
+        &[
+            "Instruction: Deposit",
+            "AnchorError thrown in programs/vault/src/lib.rs:20. Error Code: ZeroAmount. Error Number: 6000. Error Message: deposit amount must be greater than zero.",
+        ],
+    );
     assert_eq!(failure.headline, "ZeroAmount");
     assert_eq!(failure.meaning, "deposit amount must be greater than zero");
 
     // A table we ship keeps its name instead of a generic guess.
-    let failure = diagnose(1, "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", &["Instruction: Transfer", "Error: insufficient funds"]);
+    let failure = diagnose(
+        1,
+        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        &["Instruction: Transfer", "Error: insufficient funds"],
+    );
     assert_ne!(failure.headline, "custom program error 1");
 
     // Unnamed anywhere: the program's own last words explain it.
-    let failure = diagnose(6001, vault, &["Instruction: Withdraw", "vault is locked until slot 900"]);
+    let failure = diagnose(
+        6001,
+        vault,
+        &["Instruction: Withdraw", "vault is locked until slot 900"],
+    );
     assert_eq!(failure.headline, "Anchor user error #1");
     assert_eq!(failure.meaning, "the program logged: vault is locked until slot 900");
 }

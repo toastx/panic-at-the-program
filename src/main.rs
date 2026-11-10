@@ -33,10 +33,6 @@ fn main() -> io::Result<()> {
     let suite = (signature.as_deref() == Some("test")).then(prepare_suite);
     let verbose = suite.is_some() && args.any(|arg| arg == "--verbose");
 
-    if !ai::configured() {
-        ai::setup()?;
-    }
-
     ui::widgets::load_theme();
     enable_raw_mode()?;
     let mut out = io::stdout();
@@ -46,17 +42,19 @@ fn main() -> io::Result<()> {
     // Held until the TUI exits: dropping it kills the validator we started.
     let mut _validator = None;
     let mut app = match suite {
-        Some((root, framework, command)) => match test_screen(&mut term, root, framework, command, verbose, &mut _validator)? {
-            Ok(app) => app,
-            Err(report) => {
-                leave(&mut term)?;
-                // Left in the scrollback, the way a plain `anchor test` would.
-                for line in report {
-                    eprintln!("{line}");
+        Some((root, framework, command)) => {
+            match test_screen(&mut term, root, framework, command, verbose, &mut _validator)? {
+                Ok(app) => app,
+                Err(report) => {
+                    leave(&mut term)?;
+                    // Left in the scrollback, the way a plain `anchor test` would.
+                    for line in report {
+                        eprintln!("{line}");
+                    }
+                    return Ok(());
                 }
-                return Ok(());
             }
-        },
+        }
         None => {
             let cluster = args.next().unwrap_or_else(|| "devnet".to_string());
             let mut app = App::new(cluster);
@@ -66,6 +64,11 @@ fn main() -> io::Result<()> {
             app
         }
     };
+
+    // Asked once, inside the TUI; whatever the answer, it is saved.
+    if !ai::configured() {
+        app.mode = Mode::AiSetup;
+    }
 
     while !app.quit {
         term.draw(|f| ui::screens::draw(f, &mut app))?;
@@ -82,9 +85,6 @@ fn main() -> io::Result<()> {
                 _ => {}
             },
             _ => {}
-        }
-        if let Some(prompt) = app.agent_prompt.take() {
-            run_agent(&mut term, &mut app, &prompt)?;
         }
     }
 
@@ -169,7 +169,9 @@ fn test_screen(
                     // Only a transaction still on localnet needs it; give the TUI a while.
                     if let Some(v) = validator.as_ref() {
                         match &outcome {
-                            Outcome::Open { cluster: "localnet", .. } => v.expire_after(suite::TTL),
+                            Outcome::Open {
+                                cluster: "localnet", ..
+                            } => v.expire_after(suite::TTL),
                             _ => v.stop(),
                         }
                     }
@@ -398,27 +400,6 @@ fn ai_command(args: &[String]) -> io::Result<()> {
     Ok(())
 }
 
-/// Lets the agent have the terminal, then takes it back. Spawning a window
-/// instead would be a guess at which emulator is running.
-fn run_agent(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, prompt: &str) -> io::Result<()> {
-    let Some(agent) = ai::agent() else { return Ok(()) };
-    if !suite::available(ai::program(&agent)) {
-        app.message = format!("`{}` not on PATH", ai::program(&agent));
-        return Ok(());
-    }
-    disable_raw_mode()?;
-    execute!(term.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
-    let result = ai::send(&agent, prompt);
-    enable_raw_mode()?;
-    execute!(term.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
-    term.clear()?;
-    app.message = match result {
-        Ok(()) => format!("{agent} exited"),
-        Err(err) => format!("{agent}: {err}"),
-    };
-    Ok(())
-}
-
 /// The markdown for what is loaded, when AI export is on and it is a transaction.
 fn ai_context(app: &App) -> Option<String> {
     ai::agent()?;
@@ -487,6 +468,43 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
     match &mut app.mode {
         Mode::Help => {
             app.mode = Mode::Normal;
+            return;
+        }
+        Mode::AiSetup => {
+            let enabled = match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => true,
+                KeyCode::Char('n' | 'q') | KeyCode::Esc => false,
+                _ => return,
+            };
+            app.mode = Mode::Normal;
+            app.message = match ai::set_enabled(enabled) {
+                Ok(()) if enabled => "AI export on: press 'a' on a transaction".to_string(),
+                Ok(()) => "AI export off: press 'a' to turn it on later".to_string(),
+                Err(err) => format!("AI setting not saved: {err}"),
+            };
+            return;
+        }
+        Mode::Ai => {
+            app.mode = Mode::Normal;
+            let Some(text) = ai_context(app) else { return };
+            app.message = match key.code {
+                KeyCode::Char('c') => match ai::copy(&text) {
+                    Ok(()) => format!("copied diagnosis ({} lines)", text.lines().count()),
+                    Err(err) => format!("clipboard: {err}"),
+                },
+                KeyCode::Char('o') | KeyCode::Enter => {
+                    let agent = ai::agent().unwrap_or_default();
+                    match ai::open(&agent, &text) {
+                        Ok(window) => format!("opened {agent} in a new {window} window"),
+                        // Still useful: the text is on the clipboard to paste by hand.
+                        Err(err) => match ai::copy(&text) {
+                            Ok(()) => format!("couldn't open {agent} ({err}); copied the diagnosis instead"),
+                            Err(_) => format!("couldn't open {agent}: {err}"),
+                        },
+                    }
+                }
+                _ => return,
+            };
             return;
         }
         Mode::Open(buffer) => {
@@ -572,15 +590,17 @@ pub fn on_key(app: &mut App, key: KeyEvent) {
                 app.message = format!("theme not saved: {err}");
             }
         }
-        KeyCode::Char('y') => {
-            if let Some(text) = ai_context(app) {
-                app.message = match ai::copy(&text) {
-                    Ok(()) => format!("copied diagnosis ({} lines)", text.lines().count()),
-                    Err(err) => format!("clipboard: {err}"),
-                };
+        KeyCode::Char('a') => {
+            app.mode = match ai_context(app) {
+                Some(_) => Mode::Ai,
+                // Off: ask again, so it can be turned on without leaving the TUI.
+                None if ai::agent().is_none() => Mode::AiSetup,
+                None => {
+                    app.message = "open a transaction first".to_string();
+                    Mode::Normal
+                }
             }
         }
-        KeyCode::Char('a') => app.agent_prompt = ai_context(app),
         KeyCode::Char('c') => app.toggle_cluster_menu(),
         KeyCode::Char(']') => app.step_cluster(1),
         KeyCode::Char('[') => app.step_cluster(-1),

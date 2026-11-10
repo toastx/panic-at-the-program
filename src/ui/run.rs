@@ -54,7 +54,10 @@ impl Run {
     }
 
     pub fn step(&mut self, text: String) {
-        self.steps.push(Step { text, notes: Vec::new() });
+        self.steps.push(Step {
+            text,
+            notes: Vec::new(),
+        });
     }
 
     pub fn note(&mut self, text: String) {
@@ -143,7 +146,11 @@ pub fn draw(f: &mut Frame, run: &Run) {
     let step_rows = run.steps.iter().map(|s| 1 + s.notes.len()).sum::<usize>() as u16 + 3;
     let rows = Layout::vertical([
         Constraint::Length(1),
-        if run.shows_logs() { Constraint::Length(step_rows) } else { Constraint::Min(step_rows) },
+        if run.shows_logs() {
+            Constraint::Length(step_rows)
+        } else {
+            Constraint::Min(step_rows)
+        },
         Constraint::Min(if run.shows_logs() { 3 } else { 0 }),
         Constraint::Length(if result.is_empty() { 0 } else { result.len() as u16 + 2 }),
         Constraint::Length(1),
@@ -204,14 +211,21 @@ fn steps(f: &mut Frame, area: Rect, run: &Run) {
             Span::styled(format!(" {glyph} "), Style::new().fg(color).bold()),
             Span::styled(step.text.clone(), Style::new().fg(theme().strong)),
         ]));
-        lines.extend(step.notes.iter().map(|note| Line::styled(format!("   └ {note}"), muted())));
+        lines.extend(
+            step.notes
+                .iter()
+                .map(|note| Line::styled(format!("   └ {note}"), muted())),
+        );
     }
     // Without the output panel, a ticker of the latest line shows it is alive.
     if run.outcome.is_none()
         && !run.shows_logs()
         && let Some(latest) = run.logs.iter().rev().find(|l| !l.trim().is_empty())
     {
-        lines.push(Line::styled(format!("   › {}", latest.trim()), Style::new().fg(theme().dim)));
+        lines.push(Line::styled(
+            format!("   › {}", latest.trim()),
+            Style::new().fg(theme().dim),
+        ));
     }
     f.render_widget(Paragraph::new(lines), inner);
 }
