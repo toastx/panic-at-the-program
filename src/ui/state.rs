@@ -158,7 +158,8 @@ impl App {
             node_index: None,
             section_columns: 3,
             stack: Vec::new(),
-            focus_nav: false,
+            // Nothing is open yet, so start in the history; opening anything moves focus to it.
+            focus_nav: true,
             list: ListState::default(),
             collapsed: HashSet::new(),
             mode: Mode::Normal,

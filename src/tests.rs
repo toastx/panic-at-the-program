@@ -316,6 +316,7 @@ fn value_flow_derives_transfers_and_links_to_instructions() {
     let mut app = App::new("devnet".into());
     app.tx = Some(solana::parse("4vK9mP", "devnet", &transfer_fixture()));
     app.kind = solana::Kind::Tx;
+    app.focus_nav = false; // what loading a transaction does
     app.goto(Screen::Flow);
 
     let transfers = solana::transfers(app.tx().unwrap());
@@ -1167,12 +1168,14 @@ fn sidebar_lists_entities_by_kind() {
             key: "4GbWN1uNx2TH78dCtrZszmja1Jg6DW9F426S7QPt5uRa".into(),
             status: Some(Status::Failed),
             detail: " 6 ix  114,678 CU".into(),
+            run: None,
         },
         solana::Entry {
             kind: solana::Kind::Account,
             key: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".into(),
             status: None,
             detail: "   82 B  Token Program".into(),
+            run: None,
         },
     ];
     let screen = render(&mut app, 120, 34);
@@ -2137,4 +2140,66 @@ fn custom_codes_without_an_idl_are_named_from_logs_and_tables() {
     );
     assert_eq!(failure.headline, "Anchor user error #1");
     assert_eq!(failure.meaning, "the program logged: vault is locked until slot 900");
+}
+
+#[test]
+fn history_groups_test_runs_newest_first() {
+    let mut app = App::new("tests".into());
+    let entry = |key: &str, run| solana::Entry {
+        kind: solana::Kind::Tx,
+        key: key.to_string(),
+        status: Some(solana::Status::Failed),
+        detail: String::new(),
+        run,
+    };
+    app.entries = vec![
+        entry("2/deposit fails", Some(2)),
+        entry("1/withdraw fails", Some(1)),
+        entry("4GbWN1uNx2TH78dCtrZszmja1Jg6DW9F426S7QPt5uRa", None),
+    ];
+    let screen = render(&mut app, 120, 34);
+    let at = |text: &str| screen.find(text).unwrap_or_else(|| panic!("no {text}:\n{screen}"));
+    assert!(at("▾ test run 2") < at("deposit fails"), "{screen}");
+    assert!(at("deposit fails") < at("▾ test run 1"), "{screen}");
+    assert!(at("withdraw fails") < at("▾ earlier"), "{screen}");
+    assert!(app.focus_nav, "a fresh launch starts in the history");
+    assert!(!screen.contains("1/withdraw"), "the test name, not the key:\n{screen}");
+
+    // Header rows shift the list, so the click for an entry sits on its own line.
+    let line = screen.lines().position(|line| line.contains("withdraw fails")).unwrap() as u16;
+    assert!(
+        app.hits
+            .iter()
+            .any(|hit| hit.area.y == line && matches!(hit.click, Click::Entry(1))),
+        "{screen}"
+    );
+}
+
+#[test]
+fn test_runs_share_one_file_and_never_overwrite() {
+    let cluster = "test-runs-check";
+    solana::evict(cluster, "runs");
+    let tx = |code: u64| json!({"result": {"meta": {"err": {"InstructionError": [0, {"Custom": code}]}}}});
+    let run = |cases: &[(&str, u64)]| {
+        let cases = cases.iter().map(|(name, code)| (name.to_string(), tx(*code))).collect();
+        solana::store_run(cluster, cases).unwrap()
+    };
+
+    assert_eq!(run(&[("deposit fails", 1)]), 1);
+    // The same test failing again lands in a new run beside the old one.
+    assert_eq!(run(&[("deposit fails", 2), ("withdraw fails", 3)]), 2);
+    let code = |key: &str| {
+        solana::load(cluster, key).unwrap()["result"]["meta"]["err"]["InstructionError"][1]["Custom"].clone()
+    };
+    assert_eq!(code("1/deposit fails"), 1);
+    assert_eq!(code("2/deposit fails"), 2);
+
+    let keys: Vec<String> = solana::entries(cluster).into_iter().map(|entry| entry.key).collect();
+    assert_eq!(
+        keys,
+        ["2/deposit fails", "2/withdraw fails", "1/deposit fails"],
+        "newest run first"
+    );
+    assert_eq!(solana::cached(cluster), ["runs"], "one file holds every run");
+    solana::evict(cluster, "runs");
 }

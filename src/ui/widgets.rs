@@ -421,10 +421,30 @@ pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
         );
     }
 
-    let items: Vec<ListItem> = app
-        .entries
-        .iter()
-        .map(|entry| {
+    // A header row wherever the test run changes; `rows_to_entries` maps each
+    // list row back to its entry, None for a header.
+    let mut rows_to_entries = Vec::new();
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut previous = None;
+    for (index, entry) in app.entries.iter().enumerate() {
+        if entry.run != previous {
+            let label = entry
+                .run
+                .map_or_else(|| "earlier".to_string(), |run| format!("test run {run}"));
+            items.push(ListItem::new(Line::styled(format!("▾ {label}"), muted())));
+            rows_to_entries.push(None);
+        }
+        previous = entry.run;
+        rows_to_entries.push(Some(index));
+        items.push({
+            // A test run's entries are keyed by their test name; anything else by an address.
+            let name = match entry.run {
+                Some(_) => entry
+                    .key
+                    .split_once('/')
+                    .map_or(entry.key.clone(), |(_, test)| test.to_string()),
+                None => short(&entry.key),
+            };
             let (tag, color) = match entry.kind {
                 Kind::Tx => ("tx:", theme().info),
                 Kind::Account => ("acc:", theme().accent),
@@ -439,24 +459,13 @@ pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
                     Style::new().fg(entry.status.map_or(theme().muted, status_color)),
                 ),
                 Span::styled(tag, Style::new().fg(color)),
-                Span::raw(short(&entry.key)),
+                Span::raw(name),
             ]))
-        })
-        .collect();
-
-    for row in 0..items.len().min(rows[0].height as usize) {
-        app.push_hit(
-            Rect {
-                x: rows[0].x,
-                y: rows[0].y + row as u16,
-                width: rows[0].width,
-                height: 1,
-            },
-            Click::Entry(row),
-        );
+        });
     }
 
-    let mut state = ListState::default().with_selected(Some(app.entry_index));
+    let selected = rows_to_entries.iter().position(|row| *row == Some(app.entry_index));
+    let mut state = ListState::default().with_selected(selected);
     f.render_stateful_widget(
         List::new(items).highlight_style(if app.focus_nav {
             Style::new().bg(theme().select).bold()
@@ -466,6 +475,25 @@ pub fn render_nav(f: &mut Frame, area: Rect, app: &mut App) {
         rows[0],
         &mut state,
     );
+
+    // Hits after rendering, so they follow the list's scroll offset.
+    let visible = rows_to_entries
+        .iter()
+        .skip(state.offset())
+        .take(rows[0].height as usize);
+    for (row, entry) in visible.enumerate() {
+        if let Some(index) = entry {
+            app.push_hit(
+                Rect {
+                    x: rows[0].x,
+                    y: rows[0].y + row as u16,
+                    width: rows[0].width,
+                    height: 1,
+                },
+                Click::Entry(*index),
+            );
+        }
+    }
 
     if help_height > 0 {
         nav_help(
