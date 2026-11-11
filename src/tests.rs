@@ -1875,6 +1875,82 @@ fn ai_context_carries_the_diagnosis_tree_and_accounts() {
     assert!(context.contains("signer, writable"), "the account roles:\n{context}");
 }
 
+/// Compute Budget, a successful instruction with a CPI, then the failing one,
+/// handed System, Token and a sysvar it never touches.
+fn busy_fixture() -> serde_json::Value {
+    const VAULT: &str = "Vau1t11111111111111111111111111111111111";
+    const MEMO: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+    json!({"result": {
+        "slot": 1u64,
+        "meta": {
+            "err": {"InstructionError": [2, {"Custom": 2006}]},
+            "fee": 5000u64,
+            "computeUnitsConsumed": 9000u64,
+            "preBalances": [10u64, 0, 0, 0, 0, 0, 0, 0, 0],
+            "postBalances": [10u64, 0, 0, 0, 0, 0, 0, 0, 0],
+            "innerInstructions": [{"index": 1, "instructions": [{"programIdIndex": 7, "accounts": [0], "data": ""}]}],
+            "logMessages": [
+                "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+                "Program ComputeBudget111111111111111111111111111111 success",
+                format!("Program {MEMO} invoke [1]"),
+                "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [2]",
+                "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA success",
+                format!("Program {MEMO} success"),
+                format!("Program {VAULT} invoke [1]"),
+                "Program log: AnchorError caused by account: vault. Error Code: ConstraintSeeds. Error Number: 2006. Error Message: A seeds constraint was violated.",
+                format!("Program {VAULT} consumed 4000 of 200000 compute units"),
+                format!("Program {VAULT} failed: custom program error: 0x7d6")
+            ]
+        },
+        "transaction": {"message": {
+            "header": {"numRequiredSignatures": 1, "numReadonlySignedAccounts": 0, "numReadonlyUnsignedAccounts": 7},
+            "accountKeys": [
+                "Payer1111", "VaultPda11", "Mint11111",
+                "11111111111111111111111111111111", "SysvarRent111111111111111111111111111111111",
+                "ComputeBudget111111111111111111111111111111", MEMO,
+                "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", VAULT
+            ],
+            "instructions": [
+                {"programIdIndex": 5, "accounts": [], "data": ""},
+                {"programIdIndex": 6, "accounts": [0], "data": ""},
+                {"programIdIndex": 8, "accounts": [0, 1, 2, 3, 4, 7], "data": ""}
+            ]
+        }}
+    }})
+}
+
+#[test]
+fn ai_context_keeps_only_the_failing_instruction() {
+    let tx = solana::parse("5xQ", "devnet", &busy_fixture());
+    let context = ai::markdown(&tx);
+    let tree = context
+        .split("## Call tree")
+        .nth(1)
+        .unwrap()
+        .split("## ")
+        .next()
+        .unwrap();
+
+    assert!(!tree.contains("ComputeBudget"), "its limit is in the header:\n{tree}");
+    assert!(tree.contains("— ok"), "a passing instruction keeps one line:\n{tree}");
+    assert!(!tree.contains("Tokenkeg"), "its CPIs are dropped:\n{tree}");
+    assert!(tree.contains("<-- failed here"), "{tree}");
+
+    let accounts = context.split("## Accounts").nth(1).unwrap();
+    for kept in ["Payer1111", "VaultPda11", "Mint11111"] {
+        assert!(
+            accounts.contains(kept),
+            "{kept} is what the instruction works on:\n{accounts}"
+        );
+    }
+    for dropped in ["11111111111111111111111111111111`", "SysvarRent", "Tokenkeg"] {
+        assert!(
+            !accounts.contains(dropped),
+            "{dropped} is readonly plumbing:\n{accounts}"
+        );
+    }
+}
+
 #[test]
 fn agent_script_quotes_paths_for_sh() {
     let script = ai::script("codex exec", "/work/it's here", "/tmp/panic-context.md");

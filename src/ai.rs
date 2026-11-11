@@ -5,7 +5,8 @@ use std::io::{self, Write};
 use std::process::{Command, Stdio};
 
 use crate::app::diagnose::{Confidence, Failure, Tier};
-use crate::app::solana::{Node, Status, Tx, base64_encode};
+use crate::app::idl;
+use crate::app::solana::{ATA, Node, SYSTEM, Status, TOKEN, TOKEN_2022, Tx, base64_encode, bs58_decode};
 use crate::ui::widgets::node_label;
 use crate::workspace;
 
@@ -181,21 +182,7 @@ pub fn markdown(tx: &Tx) -> String {
     out.push(String::new());
     out.push("## Call tree".to_string());
     out.push("```".to_string());
-    out.extend(tx.nodes.iter().map(|node| {
-        format!(
-            "{:indent$}{} {}  {} CU (self {}){}",
-            "",
-            node.path,
-            frame(node),
-            node.cu,
-            node.self_cu,
-            match node.status {
-                Status::Failed => "  <-- failed here",
-                Status::Ok => "",
-            },
-            indent = node.depth * 2,
-        )
-    }));
+    out.extend(tree(tx));
     out.push("```".to_string());
 
     // The failing frame's own logs, which is what the diagnosis was read from.
@@ -216,19 +203,123 @@ pub fn markdown(tx: &Tx) -> String {
         out.push("```".to_string());
     }
 
-    if !tx.accounts.is_empty() {
+    let accounts = accounts(tx);
+    if !accounts.is_empty() {
         out.push(String::new());
         out.push("## Accounts".to_string());
-        out.extend(
-            tx.accounts
-                .iter()
-                .enumerate()
-                .map(|(index, account)| format!("- #{index} `{}` — {}", account.key, account.role())),
-        );
+        out.extend(accounts);
     }
 
     out.push(String::new());
     out.join("\n")
+}
+
+const COMPUTE_BUDGET: &str = "ComputeBudget111111111111111111111111111111";
+
+/// The node the failure points at, when there is one.
+fn failing(tx: &Tx) -> Option<usize> {
+    tx.failure.as_ref()?.node
+}
+
+/// Programs and sysvars an instruction is handed only so it can call them:
+/// readonly, they tell an agent nothing about why it failed.
+fn plumbing(key: &str) -> bool {
+    matches!(key, SYSTEM | TOKEN | TOKEN_2022 | ATA | COMPUTE_BUDGET) || key.starts_with("Sysvar")
+}
+
+/// The failing top-level instruction in full; the others one line each, in
+/// order, so "the ATA was created first" survives without their CPIs.
+/// Compute Budget is dropped: its limit is already in the header.
+fn tree(tx: &Tx) -> Vec<String> {
+    let line = |node: &Node| {
+        format!(
+            "{:indent$}{} {}  {} CU (self {}){}",
+            "",
+            node.path,
+            frame(node),
+            node.cu,
+            node.self_cu,
+            match node.status {
+                Status::Failed => "  <-- failed here",
+                Status::Ok => "",
+            },
+            indent = node.depth * 2,
+        )
+    };
+    let Some(failed) = failing(tx) else {
+        return tx.nodes.iter().map(line).collect();
+    };
+    let top = tx.nodes[..=failed]
+        .iter()
+        .rposition(|node| node.depth == 0)
+        .unwrap_or(0);
+    let mut out = Vec::new();
+    let mut inside = false;
+    for (index, node) in tx.nodes.iter().enumerate() {
+        if node.depth == 0 {
+            inside = index == top;
+        }
+        if inside {
+            out.push(line(node));
+        } else if node.depth == 0 && node.program != COMPUTE_BUDGET {
+            out.push(format!("{} {} — ok", node.path, frame(node)));
+        }
+    }
+    out
+}
+
+/// The failing instruction's accounts under their IDL names, minus readonly
+/// plumbing, unless the error or a finding points at it. Without a failing
+/// instruction, every account the transaction loaded, minus the same plumbing.
+fn accounts(tx: &Tx) -> Vec<String> {
+    let Some(node) = failing(tx).map(|index| &tx.nodes[index]) else {
+        return tx
+            .accounts
+            .iter()
+            .filter(|account| account.signer || account.writable || !plumbing(&account.key))
+            .map(|account| format!("- `{}` — {}", account.key, account.role()))
+            .collect();
+    };
+    let decoded = idl::idl(&tx.cluster, &node.program).and_then(|idl| idl::instruction(&idl, &bs58_decode(&node.data)));
+    let blamed = tx.failure.as_ref().and_then(|failure| failure.account.as_deref());
+
+    let mut out = Vec::new();
+    if let Some(decoded) = decoded.as_ref().filter(|decoded| !decoded.args.is_empty()) {
+        out.push(format!(
+            "args: {}",
+            decoded
+                .args
+                .iter()
+                .map(|(name, value)| format!("{name} = {value}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    for (index, account) in node.accounts.iter().enumerate() {
+        let name = decoded
+            .as_ref()
+            .and_then(|decoded| decoded.specs.get(index))
+            .map(|spec| spec.name.as_str());
+        let findings: Vec<&str> = tx
+            .findings
+            .iter()
+            .filter(|finding| finding.key == account.key)
+            .map(|finding| finding.message.as_str())
+            .collect();
+        let pointed_at = blamed.is_some() && name == blamed;
+        if !account.signer && !account.writable && plumbing(&account.key) && !pointed_at && findings.is_empty() {
+            continue;
+        }
+        let mut entry = match name {
+            Some(name) => format!("- #{index} {name} `{}` — {}", account.key, account.role()),
+            None => format!("- #{index} `{}` — {}", account.key, account.role()),
+        };
+        for finding in findings {
+            entry.push_str(&format!("\n  - {finding}"));
+        }
+        out.push(entry);
+    }
+    out
 }
 
 /// A tree frame as an agent wants it: the full program id rather than the short
