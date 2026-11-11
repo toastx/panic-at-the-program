@@ -552,11 +552,7 @@ pub fn stash(cases: &[Case]) -> Vec<String> {
             "" => format!("failure {}", index + 1),
             name => name.to_string(),
         };
-        // Two failures from one test: number the later ones rather than lose them.
-        let name = match run.contains_key(&name) {
-            true => format!("{name} #{}", index + 1),
-            false => name,
-        };
+        let name = unique(&run, name);
         run.insert(name.clone(), transaction_json(case));
         names.push(name);
     }
@@ -565,6 +561,18 @@ pub fn stash(cases: &[Case]) -> Vec<String> {
         Ok(number) => names.into_iter().map(|name| format!("{number}/{name}")).collect(),
         Err(_) => Vec::new(),
     }
+}
+
+/// Two failures from one test: number the later ones rather than lose them,
+/// counting up past any name already taken, `foo #2` included.
+fn unique(run: &serde_json::Map<String, Value>, name: String) -> String {
+    if !run.contains_key(&name) {
+        return name;
+    }
+    (2..)
+        .map(|n| format!("{name} #{n}"))
+        .find(|candidate| !run.contains_key(candidate))
+        .unwrap_or(name)
 }
 
 #[cfg(test)]
@@ -644,6 +652,17 @@ Error: AnchorError caused by account: vault. Error Code: ConstraintSeeds. Error 
     fn available_distinguishes_missing_from_failing() {
         assert!(super::available("cargo"));
         assert!(!super::available("panic-no-such-program"));
+    }
+
+    #[test]
+    fn unique_names_never_collide() {
+        let mut run = serde_json::Map::new();
+        for name in ["foo", "foo #2", "foo", "foo"] {
+            let name = super::unique(&run, name.to_string());
+            run.insert(name, serde_json::Value::Null);
+        }
+        let names: Vec<&String> = run.keys().collect();
+        assert_eq!(names, ["foo", "foo #2", "foo #3", "foo #4"]);
     }
 
     #[test]
