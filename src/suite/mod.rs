@@ -543,27 +543,28 @@ fn transaction_json(case: &Case) -> Value {
     value
 }
 
-fn key(name: &str) -> String {
-    let key: String = name
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    key.trim_matches('-').chars().take(60).collect()
-}
-
+/// Stores the cases as one more run in the runs file, by test name.
 pub fn stash(cases: &[Case]) -> Vec<String> {
-    cases
-        .iter()
-        .enumerate()
-        .filter_map(|(index, case)| {
-            let key = match key(&case.name) {
-                key if key.is_empty() => format!("failure-{}", index + 1),
-                key => key,
-            };
-            crate::app::solana::store(CLUSTER, &key, &transaction_json(case)).ok()?;
-            Some(key)
-        })
-        .collect()
+    let mut run = serde_json::Map::new();
+    let mut names = Vec::new();
+    for (index, case) in cases.iter().enumerate() {
+        let name = match case.name.trim() {
+            "" => format!("failure {}", index + 1),
+            name => name.to_string(),
+        };
+        // Two failures from one test: number the later ones rather than lose them.
+        let name = match run.contains_key(&name) {
+            true => format!("{name} #{}", index + 1),
+            false => name,
+        };
+        run.insert(name.clone(), transaction_json(case));
+        names.push(name);
+    }
+    // In case order, not the map's: the caller opens the last one to fail.
+    match crate::app::solana::store_run(CLUSTER, run) {
+        Ok(number) => names.into_iter().map(|name| format!("{number}/{name}")).collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -653,7 +654,6 @@ Error: AnchorError caused by account: vault. Error Code: ConstraintSeeds. Error 
         assert_eq!(cases[0].cu, Some(4521));
         assert_eq!(cases[0].err["InstructionError"][1]["Custom"], 2006);
         assert_eq!(cases[0].logs.as_deref().map(<[String]>::len), Some(5));
-        assert_eq!(super::key(&cases[0].name), "deposits-into-the-vault");
 
         let cases = super::cases(CARGO);
         assert_eq!(cases.len(), 1);

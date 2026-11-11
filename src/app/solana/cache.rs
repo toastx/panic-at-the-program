@@ -46,48 +46,104 @@ pub struct Entry {
     pub key: String,
     pub status: Option<Status>,
     pub detail: String,
+    /// Which `panic test` run stored it: 1, 2, 3, ... None for anything else.
+    pub run: Option<u64>,
 }
 
+/// Every `panic test` run in one file: `{"1": {"<test>": <transaction>}, "2": ...}`.
+const RUNS: &str = "runs";
+
+fn runs(cluster: &str) -> serde_json::Map<String, Value> {
+    match load_file(cluster, RUNS) {
+        Some(Value::Object(runs)) => runs,
+        _ => serde_json::Map::new(),
+    }
+}
+
+/// Adds a run of failed transactions, by test name, under the next run number,
+/// which it returns. Each is then loaded by the key `<run>/<test>`.
+pub fn store_run(cluster: &str, cases: serde_json::Map<String, Value>) -> io::Result<u64> {
+    let mut all = runs(cluster);
+    let run = all.keys().filter_map(|run| run.parse::<u64>().ok()).max().unwrap_or(0) + 1;
+    all.insert(run.to_string(), Value::Object(cases));
+    store(cluster, RUNS, &Value::Object(all))?;
+    Ok(run)
+}
+
+/// Test runs first, newest on top, then everything else cached, newest first.
 pub fn entries(cluster: &str) -> Vec<Entry> {
-    cached(cluster)
+    let tx_entry = |key: String, value: Option<Value>, run: Option<u64>| {
+        let tx = value.map(|value| parse(&key, cluster, &value));
+        Entry {
+            kind: Kind::Tx,
+            detail: tx.as_ref().map_or_else(
+                || "cached".to_string(),
+                |tx| {
+                    format!(
+                        "{:>2} ix  {:>9} CU",
+                        tx.nodes.iter().filter(|n| n.depth == 0).count(),
+                        tx.cu
+                    )
+                },
+            ),
+            status: tx.map(|tx| tx.status),
+            key,
+            run,
+        }
+    };
+
+    let mut runs: Vec<(u64, Value)> = runs(cluster)
         .into_iter()
-        .filter(|key| !key.starts_with("idl-"))
-        .map(|key| match key.strip_prefix("account-") {
-            Some(pubkey) => {
-                let account = load(cluster, &key).map(|value| parse_account(pubkey, &value));
-                Entry {
-                    kind: Kind::Account,
-                    detail: account.map_or_else(
-                        || "cached".to_string(),
-                        |a| format!("{:>5} B  {}", a.data.len(), a.owner_name()),
-                    ),
-                    key: pubkey.to_string(),
-                    status: None,
-                }
-            }
-            None => {
-                let tx = load(cluster, &key).map(|value| parse(&key, cluster, &value));
-                Entry {
-                    kind: Kind::Tx,
-                    detail: tx.as_ref().map_or_else(
-                        || "cached".to_string(),
-                        |tx| {
-                            format!(
-                                "{:>2} ix  {:>9} CU",
-                                tx.nodes.iter().filter(|n| n.depth == 0).count(),
-                                tx.cu
-                            )
-                        },
-                    ),
-                    status: tx.map(|tx| tx.status),
-                    key,
-                }
-            }
+        .filter_map(|(run, cases)| Some((run.parse().ok()?, cases)))
+        .collect();
+    runs.sort_by_key(|(run, _)| std::cmp::Reverse(*run));
+    let mut entries: Vec<Entry> = runs
+        .into_iter()
+        .flat_map(|(run, cases)| match cases {
+            Value::Object(cases) => cases
+                .into_iter()
+                .map(|(name, value)| tx_entry(format!("{run}/{name}"), Some(value), Some(run)))
+                .collect(),
+            _ => Vec::new(),
         })
-        .collect()
+        .collect();
+
+    entries.extend(
+        cached(cluster)
+            .into_iter()
+            .filter(|key| !key.starts_with("idl-") && key != RUNS)
+            .map(|key| match key.strip_prefix("account-") {
+                Some(pubkey) => {
+                    let account = load(cluster, &key).map(|value| parse_account(pubkey, &value));
+                    Entry {
+                        kind: Kind::Account,
+                        detail: account.map_or_else(
+                            || "cached".to_string(),
+                            |a| format!("{:>5} B  {}", a.data.len(), a.owner_name()),
+                        ),
+                        key: pubkey.to_string(),
+                        status: None,
+                        run: None,
+                    }
+                }
+                None => {
+                    let value = load(cluster, &key);
+                    tx_entry(key, value, None)
+                }
+            }),
+    );
+    entries
 }
 
+/// A cached response. `<run>/<test>` keys are read out of the runs file.
 pub fn load(cluster: &str, key: &str) -> Option<Value> {
+    match key.split_once('/') {
+        Some((run, test)) => runs(cluster).get(run)?.get(test).cloned(),
+        None => load_file(cluster, key),
+    }
+}
+
+fn load_file(cluster: &str, key: &str) -> Option<Value> {
     serde_json::from_reader(fs::File::open(cache_path(cluster, key)).ok()?).ok()
 }
 
@@ -97,8 +153,11 @@ pub fn store(cluster: &str, key: &str, value: &Value) -> io::Result<()> {
     serde_json::to_writer(fs::File::create(path)?, value).map_err(io::Error::other)
 }
 
+/// Test runs are never evicted: there is no chain to fetch them from again.
 pub fn evict(cluster: &str, key: &str) {
-    let _ = fs::remove_file(cache_path(cluster, key));
+    if !key.contains('/') {
+        let _ = fs::remove_file(cache_path(cluster, key));
+    }
 }
 
 /// The slice of an account that validation reads.
