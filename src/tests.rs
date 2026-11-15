@@ -2203,3 +2203,128 @@ fn test_runs_share_one_file_and_never_overwrite() {
     assert_eq!(solana::cached(cluster), ["runs"], "one file holds every run");
     solana::evict(cluster, "runs");
 }
+
+/// A simulated failure taken through the path `simulate_transaction` uses, from
+/// the tap's capture to the agent JSON.
+fn verdict(response: &Value) -> Value {
+    let request = crate::suite::tap::SEND_REQUEST.as_bytes();
+    let capture = crate::suite::tap::capture(request, response.to_string().as_bytes()).expect("a failure");
+    let case = suite::captured(&[capture]).pop().expect("a case");
+    ai::json(&ai::analyze("simulation", "tests", &suite::transaction_json(&case)))
+}
+
+fn simulated(err: Value, logs: &[&str]) -> Value {
+    verdict(&json!({"result": {"value": {"err": err, "logs": logs, "unitsConsumed": 1000}}}))
+}
+
+#[test]
+fn agent_json_maps_each_diagnosis_to_an_action() {
+    let program = "2dMxE4PyZtESZXUzKktvUUUd27WoYyhs1Pb6L3aPYGf5";
+    let invoke = format!("Program {program} invoke [1]");
+    let failed = |why: &str| format!("Program {program} failed: {why}");
+    let cases = [
+        (
+            simulated(
+                json!("ComputationalBudgetExceeded"),
+                &[
+                    &invoke,
+                    "Program log: Instruction: Swap",
+                    &failed("exceeded CUs meter at BPF instruction"),
+                ],
+            ),
+            "cu.exceeded",
+            "raise_compute_and_retry",
+            true,
+        ),
+        (
+            simulated(
+                json!({"InstructionError": [0, {"Custom": 6001}]}),
+                &[
+                    &invoke,
+                    "Program log: slippage tolerance exceeded",
+                    &failed("custom program error: 0x1771"),
+                ],
+            ),
+            "slippage",
+            "requote_and_retry",
+            true,
+        ),
+        (
+            simulated(
+                json!({"InstructionError": [0, {"Custom": 1}]}),
+                &[
+                    &invoke,
+                    "Transfer: insufficient lamports 100, need 500",
+                    &failed("custom program error: 0x1"),
+                ],
+            ),
+            "lamports.shortfall",
+            "fund_account",
+            false,
+        ),
+        (
+            simulated(json!("AccountInUse"), &[]),
+            "runtime.AccountInUse",
+            "retry",
+            true,
+        ),
+        (
+            // An address that exists is not a lock: resending repeats it.
+            simulated(
+                json!({"InstructionError": [0, {"Custom": 0}]}),
+                &[
+                    &invoke,
+                    "Allocate: account Address { .. } already in use",
+                    &failed("custom program error: 0x0"),
+                ],
+            ),
+            "account.in_use",
+            "fix_transaction",
+            false,
+        ),
+    ];
+    for (out, diagnostic, action, retryable) in cases {
+        assert_eq!(out["status"], "failed", "{out}");
+        assert_eq!(out["diagnostic"], diagnostic, "{out}");
+        assert_eq!(out["action"], action, "{out}");
+        assert_eq!(out["retryable"], retryable, "{out}");
+    }
+
+    // The recorded preflight failure carries the instruction, its accounts and the fix.
+    let out = verdict(&serde_json::from_str(crate::suite::tap::SEND_INSUFFICIENT_FUNDS).expect("json"));
+    assert_eq!(out["instruction"], "Withdraw", "{out}");
+    assert_eq!(out["program"], program);
+    assert_eq!(out["accounts"].as_array().map(Vec::len), Some(2), "{out}");
+    assert!(out["fix"].is_string(), "{out}");
+    assert!(!out["logs"].as_array().expect("logs").is_empty());
+}
+
+#[test]
+fn mcp_answers_requests_and_ignores_notifications() {
+    let request = |method: &str| json!({"jsonrpc": "2.0", "id": 7, "method": method, "params": {}});
+    let tools = crate::mcp::handle(&request("tools/list")).expect("a reply");
+    let names: Vec<&str> = tools["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["diagnose_transaction", "simulate_transaction", "inspect_account"]
+    );
+    assert_eq!(tools["id"], 7);
+
+    let init = crate::mcp::handle(&request("initialize")).expect("a reply");
+    assert_eq!(init["result"]["serverInfo"]["name"], "panic");
+    assert!(crate::mcp::handle(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).is_none());
+    assert_eq!(
+        crate::mcp::handle(&request("nope")).expect("a reply")["error"]["code"],
+        -32601
+    );
+
+    // A missing argument is the tool's error, for the agent to read, not a protocol error.
+    let call = json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "diagnose_transaction", "arguments": {}}});
+    let reply = crate::mcp::handle(&call).expect("a reply");
+    assert_eq!(reply["result"]["isError"], true);
+}
