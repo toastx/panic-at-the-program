@@ -79,6 +79,38 @@ On a transaction, `a` opens a menu:
 - `c` copies the diagnosis as markdown — the error and what it means, the notes with their tiers, the failing instruction, the CPI tree with compute units, the failing frame's logs, and the account list. The copy goes through an OSC 52 escape, so it reaches your clipboard over SSH too.
 - `o` opens your agent in a new terminal window with that markdown as its opening prompt, in the directory you ran `panic` from. The TUI stays open. tmux, WezTerm, Ghostty, kitty, iTerm and Terminal.app are supported, plus `x-terminal-emulator` / `gnome-terminal` on Linux; anywhere else it copies the diagnosis instead.
 
+### For agents: JSON and MCP
+
+Agents can call panic directly instead of reading a pasted export:
+
+```sh
+panic diagnose <signature> [cluster] --json    # a failed transaction, as JSON
+panic diagnose <signature> [cluster]           # the same, as the AI-export markdown
+panic simulate <base64-tx> [cluster]           # an unsent transaction, simulated and diagnosed
+panic mcp                                      # an MCP server on stdio
+```
+
+```json
+{ "status": "failed", "diagnostic": "slippage", "confidence": "high",
+  "instruction": "swap", "action": "requote_and_retry", "retryable": true, ... }
+```
+
+`action` is what to do next: `retry` (write-lock contention, an expired blockhash), `raise_compute_and_retry`, `requote_and_retry`, `fund_account`, `stop_and_report` (a missing signature), or `fix_transaction`. A simulation that passes returns `"action": "send"`. The output also carries the error, the failing instruction, its accounts with their findings, every note, and the logs of the failing frame.
+
+The MCP server exposes `diagnose_transaction`, `simulate_transaction` and `inspect_account`. Register it with Claude Code:
+
+```sh
+claude mcp add panic -- panic mcp
+```
+
+or with Codex, in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.panic]
+command = "panic"
+args = ["mcp"]
+```
+
 ## What you get
 
 A transaction opens into a set of screens: **Overview**, **Execution** (weighted CPI tree with per-frame compute), **Invocation**, **Accounts**, **Flow** (token transfers), **State Diff**, and **Logs** (nested under their invocation frames). Accounts open into **Info**, **Data** (parsed through the IDL when one is found), and **Raw**.

@@ -518,7 +518,7 @@ fn nearest_name(names: &[(usize, String)], index: usize, nth: usize) -> String {
 /// A `getTransaction` response carrying only what we were actually told. Absent
 /// evidence is left out rather than zeroed: a 0 we invented would read as a
 /// measurement, and `parse` tolerates every one of these keys being missing.
-fn transaction_json(case: &Case) -> Value {
+pub(crate) fn transaction_json(case: &Case) -> Value {
     let mut meta = json!({"err": case.err});
     if let Some(logs) = &case.logs {
         meta["logMessages"] = json!(logs);

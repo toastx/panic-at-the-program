@@ -4,9 +4,12 @@
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
 
-use crate::app::diagnose::{Confidence, Failure, Tier};
+use serde_json::{Value, json};
+
+use crate::app::diagnose::{Confidence, DiagnosticId, Failure, LogId, Tier};
+use crate::app::errors::Class;
 use crate::app::idl;
-use crate::app::solana::{ATA, Node, SYSTEM, Status, TOKEN, TOKEN_2022, Tx, base64_encode, bs58_decode};
+use crate::app::solana::{self, ATA, Node, SYSTEM, Status, TOKEN, TOKEN_2022, Tx, base64_encode, bs58_decode};
 use crate::ui::widgets::node_label;
 use crate::workspace;
 
@@ -185,13 +188,7 @@ pub fn markdown(tx: &Tx) -> String {
     out.extend(tree(tx));
     out.push("```".to_string());
 
-    // The failing frame's own logs, which is what the diagnosis was read from.
-    let frame = tx
-        .failure
-        .as_ref()
-        .and_then(|failure| failure.node)
-        .and_then(|node| tx.logs.get(tx.nodes[node].logs.clone()));
-    let logs = frame.unwrap_or(&tx.logs);
+    let logs = frame_logs(tx);
     if !logs.is_empty() {
         out.push(String::new());
         out.push("## Logs".to_string());
@@ -212,6 +209,14 @@ pub fn markdown(tx: &Tx) -> String {
 
     out.push(String::new());
     out.join("\n")
+}
+
+/// The failing frame's own logs, which is what the diagnosis was read from;
+/// the whole transaction's when nothing failed.
+fn frame_logs(tx: &Tx) -> &[String] {
+    failing(tx)
+        .and_then(|node| tx.logs.get(tx.nodes[node].logs.clone()))
+        .unwrap_or(&tx.logs)
 }
 
 const COMPUTE_BUDGET: &str = "ComputeBudget111111111111111111111111111111";
@@ -280,7 +285,7 @@ fn accounts(tx: &Tx) -> Vec<String> {
             .map(|account| format!("- `{}` — {}", account.key, account.role()))
             .collect();
     };
-    let decoded = idl::idl(&tx.cluster, &node.program).and_then(|idl| idl::instruction(&idl, &bs58_decode(&node.data)));
+    let decoded = decoded(tx, node);
     let blamed = tx.failure.as_ref().and_then(|failure| failure.account.as_deref());
 
     let mut out = Vec::new();
@@ -322,6 +327,21 @@ fn accounts(tx: &Tx) -> Vec<String> {
     out
 }
 
+/// The failing instruction as its program's IDL reads it: name, args, and the
+/// declared account specs by position.
+fn decoded(tx: &Tx, node: &Node) -> Option<idl::Decoded> {
+    idl::idl(&tx.cluster, &node.program).and_then(|idl| idl::instruction(&idl, &bs58_decode(&node.data)))
+}
+
+fn tier(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Span => "span",
+        Tier::Note => "note",
+        Tier::Help => "help",
+        Tier::Fix => "fix",
+    }
+}
+
 /// A tree frame as an agent wants it: the full program id rather than the short
 /// label the screen has room for, plus the instruction name when one is known.
 fn frame(node: &Node) -> String {
@@ -353,12 +373,7 @@ fn diagnosis(tx: &Tx, failure: &Failure) -> Vec<String> {
         out.push(format!("- caused by account: {account}"));
     }
     out.extend(failure.notes.iter().map(|note| {
-        let tier = match note.tier {
-            Tier::Span => "span",
-            Tier::Note => "note",
-            Tier::Help => "help",
-            Tier::Fix => "fix",
-        };
+        let tier = tier(note.tier);
         let guess = match note.confidence {
             Confidence::Likely => " (inferred)",
             Confidence::Certain => "",
@@ -372,4 +387,181 @@ fn diagnosis(tx: &Tx, failure: &Failure) -> Vec<String> {
         format!("- {tier}: {}{values}{guess}", note.text)
     }));
     out
+}
+
+/// Fetches a transaction and diagnoses it the way the TUI does, without one.
+pub fn load(cluster: &str, signature: &str) -> Result<Tx, Box<dyn std::error::Error>> {
+    Ok(analyze(signature, cluster, &solana::fetch(cluster, signature)?))
+}
+
+/// Diagnoses a `getTransaction`-shaped value.
+pub fn analyze(signature: &str, cluster: &str, value: &Value) -> Tx {
+    let mut tx = solana::parse(signature, cluster, value);
+    idl::enrich(&mut tx);
+    tx
+}
+
+/// What an agent should do next, and whether resending can succeed. Agents
+/// need a decision, not an explanation. `class` only applies to the failure's
+/// own id, because notes have no class.
+fn action(id: &DiagnosticId, class: Option<Class>) -> Option<(&'static str, bool)> {
+    Some(match id {
+        // Write-lock contention with another transaction: it clears on its own.
+        DiagnosticId::Runtime(name) if name == "AccountInUse" => ("retry", true),
+        DiagnosticId::Log(LogId::CuExceeded) => ("raise_compute_and_retry", true),
+        DiagnosticId::Log(LogId::Slippage) => ("requote_and_retry", true),
+        DiagnosticId::Log(LogId::LamportShortfall) => ("fund_account", false),
+        DiagnosticId::Log(LogId::SignatureMissing) => ("stop_and_report", false),
+        // "already in use" means the address exists. It is not a lock, so a
+        // resend fails the same way.
+        DiagnosticId::Log(LogId::AccountInUse) => ("fix_transaction", false),
+        _ => match class? {
+            Class::Expired => ("retry", true),
+            Class::Slippage => ("requote_and_retry", true),
+            Class::Insufficient | Class::Rent => ("fund_account", false),
+            Class::NotSigner => ("stop_and_report", false),
+            _ => return None,
+        },
+    })
+}
+
+fn confidence(confidence: Option<Confidence>) -> &'static str {
+    match confidence {
+        Some(Confidence::Certain) => "high",
+        Some(Confidence::Likely) => "medium",
+        None => "low",
+    }
+}
+
+/// The diagnosis as JSON for an agent: the TUI's content plus `action`.
+pub fn json(tx: &Tx) -> Value {
+    let compute = json!({"used": tx.cu, "limit": tx.cu_limit});
+    let Some(failure) = &tx.failure else {
+        return json!({
+            "status": "ok",
+            "signature": tx.signature,
+            "cluster": tx.cluster,
+            "action": "none",
+            "retryable": false,
+            "compute": compute,
+        });
+    };
+
+    // The failure's own id first, then the notes in the order they render.
+    let (diagnostic, (action, retryable)) = std::iter::once((&failure.id, failure.class))
+        .chain(failure.notes.iter().map(|note| (&note.id, None)))
+        .find_map(|(id, class)| Some((id, action(id, class)?)))
+        .unwrap_or((&failure.id, ("fix_transaction", false)));
+    let certainty = failure
+        .notes
+        .iter()
+        .find(|note| &note.id == diagnostic)
+        .or_else(|| {
+            failure
+                .notes
+                .iter()
+                .find(|note| note.id == DiagnosticId::Log(LogId::ClassInferred))
+        })
+        .map(|note| note.confidence);
+    let fix = [Tier::Fix, Tier::Help]
+        .iter()
+        .find_map(|&wanted| failure.notes.iter().find(|note| note.tier == wanted))
+        .map(|note| note.text.clone());
+
+    let node = failure.node.map(|index| &tx.nodes[index]);
+    let specs = node
+        .and_then(|node| decoded(tx, node))
+        .map(|decoded| decoded.specs)
+        .unwrap_or_default();
+    let accounts: Vec<Value> = node
+        .map_or(&tx.accounts, |node| &node.accounts)
+        .iter()
+        .enumerate()
+        .map(|(index, account)| {
+            json!({
+                "index": index,
+                "name": specs.get(index).map(|spec| &spec.name),
+                "key": account.key,
+                "signer": account.signer,
+                "writable": account.writable,
+                "findings": tx
+                    .findings
+                    .iter()
+                    .filter(|finding| finding.key == account.key)
+                    .map(|finding| &finding.message)
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let notes: Vec<Value> = failure
+        .notes
+        .iter()
+        .map(|note| {
+            json!({
+                "id": note.id.to_string(),
+                "tier": tier(note.tier),
+                "confidence": confidence(Some(note.confidence)),
+                "text": note.text,
+                "expected": note.expected,
+                "actual": note.actual,
+            })
+        })
+        .collect();
+
+    json!({
+        "status": "failed",
+        "signature": tx.signature,
+        "cluster": tx.cluster,
+        "diagnostic": diagnostic.to_string(),
+        "confidence": confidence(certainty),
+        "action": action,
+        "retryable": retryable,
+        "error": {
+            "id": failure.id.to_string(),
+            "name": failure.headline,
+            "meaning": failure.meaning,
+            "class": failure.class.map(|class| format!("{class:?}")),
+            "account": failure.account,
+            "source": failure.source,
+        },
+        "instruction": node.map(|node| node.name.clone().unwrap_or_else(|| node.label.clone())),
+        "instruction_path": node.map(|node| &node.path),
+        "program": node.map(|node| &node.program),
+        "fix": fix,
+        "accounts": accounts,
+        "notes": notes,
+        "compute": compute,
+        "logs": frame_logs(tx).iter().take(LOG_LIMIT).collect::<Vec<_>>(),
+    })
+}
+
+/// Diagnoses an unsent transaction, given as base64 or base58, by simulating it.
+/// A failure takes the same path as one the rpc tap recorded.
+pub fn simulate(cluster: &str, transaction: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    // base58 is a subset of base64's alphabet, so only a message that decodes
+    // shows which encoding it was. Anything else goes to the RPC as base64: it
+    // reads formats our decoder does not (v1), and it says why when it cannot.
+    let bytes = bs58_decode(transaction);
+    let transaction = match solana::decode_message(&solana::base64_decode(transaction)) {
+        None if solana::decode_message(&bytes).is_some() => base64_encode(&bytes),
+        _ => transaction.to_string(),
+    };
+    let (request, response) = solana::simulate(cluster, &transaction)?;
+    let Some(capture) = crate::suite::tap::capture(&serde_json::to_vec(&request)?, &serde_json::to_vec(&response)?)
+    else {
+        let value = &response["result"]["value"];
+        return Ok(json!({
+            "status": "ok",
+            "cluster": cluster,
+            "action": "send",
+            "retryable": false,
+            "compute": {"used": value["unitsConsumed"]},
+            "logs": value["logs"],
+        }));
+    };
+    let case = crate::suite::captured(&[capture])
+        .pop()
+        .ok_or("simulation reported no result")?;
+    let tx = analyze("simulation", cluster, &crate::suite::transaction_json(&case));
+    Ok(json(&tx))
 }

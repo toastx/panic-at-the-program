@@ -1349,7 +1349,7 @@ fn require_account<'a>(
     }
 }
 
-fn decode_account_fields(
+pub(crate) fn decode_account_fields(
     cluster: &str,
     account: &crate::app::solana::AccountInfo,
 ) -> Option<(String, Vec<(String, String)>)> {

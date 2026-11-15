@@ -1,5 +1,6 @@
 mod ai;
 mod app;
+mod mcp;
 mod suite;
 #[cfg(test)]
 mod tests;
@@ -28,6 +29,12 @@ fn main() -> io::Result<()> {
     }
     if signature.as_deref() == Some("ai") {
         return ai_command(&args.collect::<Vec<_>>());
+    }
+    if signature.as_deref() == Some("mcp") {
+        return mcp::serve();
+    }
+    if let Some(command @ ("diagnose" | "simulate")) = signature.as_deref() {
+        return headless(command, &args.collect::<Vec<_>>());
     }
 
     let suite = (signature.as_deref() == Some("test")).then(prepare_suite);
@@ -368,6 +375,47 @@ fn rpc_command(args: &[String]) -> io::Result<()> {
                 "usage: panic rpc                    list clusters\n       panic rpc add <name> <url>  save a custom endpoint\n       panic rpc rm <name>         remove a custom endpoint"
             );
             std::process::exit(2);
+        }
+    }
+    Ok(())
+}
+
+/// `panic diagnose <signature> [cluster] [--json]` and
+/// `panic simulate <transaction> [cluster] [--json]`: the diagnosis on stdout,
+/// for scripts and agents. Markdown by default, the same text as the AI export.
+fn headless(command: &str, args: &[String]) -> io::Result<()> {
+    let json = args.iter().any(|arg| arg == "--json");
+    let positional: Vec<&String> = args.iter().filter(|arg| *arg != "--json").collect();
+    let (input, cluster) = match positional.as_slice() {
+        [input] => (input.as_str(), "devnet"),
+        [input, cluster] => (input.as_str(), cluster.as_str()),
+        _ => {
+            eprintln!(
+                "usage: panic diagnose <signature> [cluster] [--json]\n       panic simulate <transaction> [cluster] [--json]"
+            );
+            std::process::exit(2);
+        }
+    };
+    let outcome = match command {
+        "diagnose" => ai::load(cluster, input).map(|tx| match json {
+            true => ai::json(&tx).to_string(),
+            false => ai::markdown(&tx),
+        }),
+        // A simulation has no markdown of its own: it is the JSON either way.
+        _ => ai::simulate(cluster, input).map(|value| match json {
+            true => value.to_string(),
+            false => serde_json::to_string_pretty(&value).unwrap_or_default(),
+        }),
+    };
+    match outcome {
+        Ok(text) => println!("{text}"),
+        Err(err) if json => {
+            println!("{}", serde_json::json!({"status": "error", "error": err.to_string()}));
+            std::process::exit(1);
+        }
+        Err(err) => {
+            eprintln!("{input}: {err}");
+            std::process::exit(1);
         }
     }
     Ok(())

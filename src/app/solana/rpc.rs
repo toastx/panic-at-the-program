@@ -36,13 +36,30 @@ pub fn fetch(cluster: &str, signature: &str) -> Result<Value, Box<dyn Error>> {
     let value = rpc(
         cluster,
         "getTransaction",
-        json!([signature, {"encoding": "json", "maxSupportedTransactionVersion": 1}]),
+        // Confirmed, not the default finalized: a failure is wanted the moment it
+        // lands, not ~13s later.
+        json!([signature, {"encoding": "json", "commitment": "confirmed", "maxSupportedTransactionVersion": 1}]),
     )?;
     if value.get("result").is_none_or(Value::is_null) {
         return Err(format!("transaction not found on {cluster}").into());
     }
     store(cluster, signature, &value)?;
     Ok(value)
+}
+
+/// Runs an unsent base64 transaction through the cluster's simulation, with a
+/// fresh blockhash so a stale one does not hide the real failure. Returns the
+/// request with its response, the pair the rpc tap records.
+pub fn simulate(cluster: &str, transaction: &str) -> Result<(Value, Value), Box<dyn Error>> {
+    let params = json!([transaction, {
+        "encoding": "base64",
+        "sigVerify": false,
+        "replaceRecentBlockhash": true,
+        "commitment": "confirmed",
+    }]);
+    let request = json!({"method": "simulateTransaction", "params": params});
+    let response = rpc(cluster, "simulateTransaction", params)?;
+    Ok((request, response))
 }
 
 pub fn cluster_url(name: &str) -> String {
