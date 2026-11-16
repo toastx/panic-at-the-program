@@ -754,10 +754,12 @@ fn validation_flags_signer_writable_address_and_pda_mismatches() {
     assert_eq!(pda.actual.as_deref(), Some("Vau1t111"));
     assert!(pda.expected.as_deref().is_some_and(|key| key.len() > 32));
 
+    // More accounts than declared is `remaining_accounts`: the declared prefix
+    // still checks, and nothing is said about the rest.
     let partial = json!([{"name": "authority", "signer": true, "writable": true}]);
     assert!(
         validate::declared_findings(&idl::account_specs(&partial), node).is_empty(),
-        "optional accounts shift indices, so mismatched counts are not checked positionally"
+        "the declared prefix is right, so there is nothing to say"
     );
 
     let fixed = json!([{"name": "authority"}, {"name": "token_program", "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}]);
@@ -791,7 +793,7 @@ fn validation_flags_token_and_rent_problems_from_account_state() {
     );
 
     let roles = vec!["mint".to_string(), "associated_token".to_string()];
-    let findings = validate::state_findings(node, &roles, &state, |_| Some(2_039_280));
+    let findings = validate::state_findings(node, &roles, &state, |_| Some(2_039_280), &Default::default(), None);
     let ata = findings
         .iter()
         .find(|f| f.message.contains("associated token account"))
@@ -799,7 +801,7 @@ fn validation_flags_token_and_rent_problems_from_account_state() {
     assert_eq!(ata.level, validate::Level::Error);
     assert!(ata.expected.as_deref().is_some_and(|key| key.len() > 32));
 
-    let quiet = validate::state_findings(node, &[], &state, |_| Some(2_039_280));
+    let quiet = validate::state_findings(node, &[], &state, |_| Some(2_039_280), &Default::default(), None);
     assert!(
         quiet.iter().all(|f| f.message.contains("rent-exempt")),
         "an undeclared token account is not second-guessed"
@@ -810,7 +812,7 @@ fn validation_flags_token_and_rent_problems_from_account_state() {
     assert_eq!(rent.actual.as_deref(), Some("0.000000100 SOL"));
 
     let empty: HashMap<String, solana::AccountState> = HashMap::new();
-    assert!(validate::state_findings(node, &[], &empty, |_| None).is_empty());
+    assert!(validate::state_findings(node, &[], &empty, |_| None, &Default::default(), None).is_empty());
 }
 
 #[test]
@@ -996,7 +998,7 @@ fn heuristics_suggest_a_fix_per_failure_class() {
         0,
         0,
     );
-    assert!(panic.contains("check unwraps and arithmetic"));
+    assert!(panic.contains("checked_* or saturating_*"), "{panic}");
 
     // Runtime names the old hand-written table missed entirely.
     let seeds = fix(json!({"InstructionError": [0, "InvalidSeeds"]}), vec![], 0, 0);
@@ -1806,6 +1808,7 @@ fn the_diagnosis_renders_in_a_fixed_order() {
     assert_eq!(
         order,
         vec![
+            "Help/Certain/runtime.ProgramFailedToComplete".to_string(),
             "Help/Certain/lamports.shortfall".to_string(),
             "Help/Certain/program.panic".to_string(),
         ],
@@ -1988,6 +1991,7 @@ fn cpi_pda_authorities_are_not_reported_as_missing_signers() {
         writable: false,
         address: None,
         seeds: None,
+        pda_program: None,
     };
     // A PDA is off-curve, so it can never be a transaction signer, but a
     // program can sign for it with invoke_signed. Both keys are verified by
@@ -2327,4 +2331,351 @@ fn mcp_answers_requests_and_ignores_notifications() {
     let call = json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "diagnose_transaction", "arguments": {}}});
     let reply = crate::mcp::handle(&call).expect("a reply");
     assert_eq!(reply["result"]["isError"], true);
+}
+
+#[test]
+fn a_short_account_list_names_what_is_missing() {
+    let tx = solana::parse("4vK9mP", "devnet", &constraint_fixture());
+    let node = &tx.nodes[0];
+    let specs = idl::account_specs(&json!([
+        {"name": "authority", "signer": true},
+        {"name": "vault", "writable": true},
+        {"name": "mint"},
+        {"name": "token_program"},
+    ]));
+    let findings = validate::declared_findings(&specs, node);
+    assert_eq!(findings.len(), 1, "the gap, and nothing positional past it");
+    let gap = &findings[0];
+    assert_eq!(gap.kind, validate::FindingKind::AccountCount);
+    assert_eq!(gap.level, validate::Level::Error);
+    assert!(gap.message.contains("missing: mint, token_program"), "{}", gap.message);
+    assert_eq!(gap.expected.as_deref(), Some("4 accounts"));
+    assert_eq!(gap.actual.as_deref(), Some("2"));
+
+    // And the runtime's own word for it is corroborated by the gap.
+    let mut failure = diagnose::failure(
+        &json!({"InstructionError": [0, "NotEnoughAccountKeys"]}),
+        &tx.nodes,
+        &tx.logs,
+        0,
+        0,
+    )
+    .unwrap();
+    diagnose::add_findings(&mut failure, 0, &findings);
+    let fix = failure
+        .notes
+        .iter()
+        .find(|n| {
+            matches!(
+                n.id,
+                diagnose::DiagnosticId::Finding {
+                    kind: validate::FindingKind::AccountCount,
+                    ..
+                }
+            )
+        })
+        .expect("promoted");
+    assert_eq!(fix.tier, diagnose::Tier::Fix);
+    assert!(fix.text.contains("missing: mint"), "{}", fix.text);
+}
+
+#[test]
+fn account_state_corroborates_the_error_class() {
+    use std::collections::HashMap;
+    use validate::{Context, FindingKind, Level};
+
+    let tx = solana::parse("4vK9mP", "devnet", &constraint_fixture());
+    let node = &tx.nodes[0];
+    let roles = vec!["authority".to_string(), "vault".to_string()];
+    let with = |class| Context {
+        class: Some(class),
+        ..Default::default()
+    };
+    let kinds = |findings: &[validate::Finding]| findings.iter().map(|f| f.kind).collect::<Vec<_>>();
+
+    // Nothing on chain at the vault's address, and the program said "not initialized".
+    let empty: HashMap<String, solana::AccountState> = HashMap::new();
+    let missing = validate::state_findings(
+        node,
+        &roles,
+        &empty,
+        |_| None,
+        &with(errors::Class::Uninitialized),
+        None,
+    );
+    assert_eq!(kinds(&missing), [FindingKind::Missing, FindingKind::Missing]);
+    assert!(
+        validate::state_findings(node, &roles, &empty, |_| None, &with(errors::Class::Seeds), None).is_empty(),
+        "absence only means something when the error says so"
+    );
+
+    // A token account: mint, owner, balance 5, frozen.
+    let mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    let owner = "BdHB1RVLPXjs1yvH1Nt1rMW4nNzBjSuRtsvBh5zm8BBA";
+    let mut data = vec![0u8; 165];
+    data[0..32].copy_from_slice(&solana::bs58_decode(mint));
+    data[32..64].copy_from_slice(&solana::bs58_decode(owner));
+    data[64..72].copy_from_slice(&5u64.to_le_bytes());
+    data[108] = 2;
+    let mut state = HashMap::new();
+    state.insert(
+        "Vau1t111".to_string(),
+        solana::AccountState {
+            owner: solana::TOKEN.to_string(),
+            lamports: 2_039_280,
+            data: data.clone(),
+        },
+    );
+    let rent = |_| Some(2_039_280);
+
+    let wrong_mint = validate::state_findings(node, &roles, &state, rent, &with(errors::Class::Mint), None);
+    let found = wrong_mint
+        .iter()
+        .find(|f| f.kind == FindingKind::TokenMint)
+        .expect("the mint it holds");
+    assert_eq!(found.actual.as_deref(), Some(mint));
+    assert_eq!(found.role, "vault");
+    assert!(
+        wrong_mint
+            .iter()
+            .any(|f| f.kind == FindingKind::Frozen && f.level == Level::Warn)
+    );
+
+    let exists = validate::state_findings(node, &roles, &state, rent, &with(errors::Class::Already), None);
+    let found = exists
+        .iter()
+        .find(|f| f.kind == FindingKind::Exists)
+        .expect("it exists");
+    assert_eq!(found.actual.as_deref(), Some("Token Program"));
+
+    // The wrong-owner case names the owner it found, and the one Anchor wanted.
+    let context = Context {
+        class: Some(errors::Class::WrongOwner),
+        expected: Some("Vau1t11111111111111111111111111111111111".to_string()),
+        actual: Some(solana::TOKEN.to_string()),
+    };
+    let owned = validate::state_findings(node, &roles, &state, rent, &context, None);
+    let found = owned.iter().find(|f| f.kind == FindingKind::WrongOwner).expect("owner");
+    assert_eq!(found.actual.as_deref(), Some("Token Program"));
+
+    // A Token transfer of 10 from an account holding 5, signed by a stranger.
+    let transfer = json!({"result": {
+        "meta": {"err": {"InstructionError": [0, {"Custom": 1}]}, "logMessages": [
+            "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [1]",
+            "Program log: Instruction: Transfer",
+            "Program log: Error: insufficient funds",
+            "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA failed: custom program error: 0x1"
+        ]},
+        "transaction": {"message": {
+            "header": {"numRequiredSignatures": 1, "numReadonlySignedAccounts": 0, "numReadonlyUnsignedAccounts": 1},
+            "accountKeys": ["Stranger1", "Vau1t111", "Dest1111", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"],
+            "instructions": [{"programIdIndex": 3, "accounts": [1, 2, 0],
+                "data": solana::bs58_encode(&[&[3u8][..], &10u64.to_le_bytes()[..]].concat())}]
+        }}
+    }});
+    let mut tx = solana::parse("t", "devnet", &transfer);
+    let node = &tx.nodes[0];
+    let spent = validate::state_findings(node, &[], &state, rent, &with(errors::Class::Insufficient), None);
+    let short = spent
+        .iter()
+        .find(|f| f.kind == FindingKind::TokenShortfall)
+        .expect("shortfall");
+    assert!(
+        short.message.contains("holds 5 but the instruction moves 10"),
+        "{}",
+        short.message
+    );
+    let authority = spent
+        .iter()
+        .find(|f| f.kind == FindingKind::TokenOwner)
+        .expect("authority");
+    assert_eq!(authority.expected.as_deref(), Some(owner));
+    assert_eq!(authority.actual.as_deref(), Some("Stranger1"));
+
+    // Through the diagnosis: the shortfall is the fix, and the action is to fund.
+    let failure = tx.failure.as_mut().unwrap();
+    diagnose::add_findings(failure, 0, &spent);
+    tx.findings = spent;
+    let out = ai::json(&tx);
+    assert_eq!(out["action"], "fund_account");
+    assert_eq!(out["confidence"], "high");
+    assert!(out["fix"].as_str().unwrap().contains("holds 5"), "{out}");
+}
+
+#[test]
+fn panics_name_their_line_and_their_kind() {
+    let nodes = solana::parse("s", "devnet", &fixture()).nodes;
+    let at = |logs: &[&str]| {
+        diagnose::failure(
+            &json!({"InstructionError": [0, "ProgramFailedToComplete"]}),
+            &nodes,
+            &logs.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+            0,
+            0,
+        )
+        .unwrap()
+    };
+
+    // New rustc: the location on one line, the message on the next.
+    let new = at(&[
+        "Program log: panicked at programs/vault/src/lib.rs:42:9:",
+        "Program log: attempt to subtract with overflow",
+    ]);
+    assert_eq!(new.source.as_deref(), Some("programs/vault/src/lib.rs:42"));
+    assert_eq!(new.class, Some(errors::Class::Overflow));
+    let note = note_texts(&new).join(" | ");
+    assert!(
+        note.contains("at programs/vault/src/lib.rs:42: attempt to subtract with overflow"),
+        "{note}"
+    );
+
+    // Old rustc: message first, quoted, then the location.
+    let old =
+        at(&["Program log: panicked at 'called `Option::unwrap()` on a `None` value', programs/vault/src/lib.rs:7:20"]);
+    assert_eq!(old.source.as_deref(), Some("programs/vault/src/lib.rs:7"));
+    assert_eq!(old.class, None);
+    assert!(note_texts(&old).join(" ").contains("unwrap on None"));
+
+    // Stack and heap exhaustion have no panic line; they get their own ids.
+    let stack = at(&["Program failed to complete: Access violation in stack frame 5 at address 0x200005ff8 of size 8"]);
+    assert!(
+        stack
+            .notes
+            .iter()
+            .any(|n| n.id == diagnose::DiagnosticId::Log(diagnose::LogId::StackOverflow))
+    );
+    let heap = at(&["Program log: Error: memory allocation failed, out of memory"]);
+    assert!(
+        heap.notes
+            .iter()
+            .any(|n| n.id == diagnose::DiagnosticId::Log(diagnose::LogId::HeapExhausted))
+    );
+}
+
+#[test]
+fn a_cpi_failure_keeps_the_caller_and_its_names() {
+    // The user's program calls Token, which fails: the diagnosis points at the
+    // Token frame, but the agent needs the instruction it actually wrote.
+    let value = json!({"result": {
+        "meta": {"err": {"InstructionError": [0, {"Custom": 1}]}, "logMessages": [
+            "Program Vau1t11111111111111111111111111111111111 invoke [1]",
+            "Program log: Instruction: Withdraw",
+            "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [2]",
+            "Program log: Instruction: Transfer",
+            "Program log: Error: insufficient funds",
+            "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA failed: custom program error: 0x1",
+            "Program Vau1t11111111111111111111111111111111111 failed: custom program error: 0x1"
+        ], "innerInstructions": [{"index": 0, "instructions": [
+            {"programIdIndex": 3, "accounts": [1, 2, 0], "data": ""}
+        ]}]},
+        "transaction": {"message": {
+            "header": {"numRequiredSignatures": 1, "numReadonlySignedAccounts": 0, "numReadonlyUnsignedAccounts": 2},
+            "accountKeys": ["Auth1111", "Vau1t111", "Dest1111", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "Vau1t11111111111111111111111111111111111"],
+            "instructions": [{"programIdIndex": 4, "accounts": [0, 1, 2, 3], "data": ""}]
+        }}
+    }});
+    let tx = solana::parse("cpi", "devnet", &value);
+    assert_eq!(tx.failure.as_ref().unwrap().node, Some(1), "the Token frame failed");
+    let out = ai::json(&tx);
+    assert_eq!(out["instruction"], "Transfer");
+    assert_eq!(out["caller"]["instruction"], "Withdraw");
+    assert_eq!(out["caller"]["instruction_path"], "1");
+    assert_eq!(out["caller"]["program"], "Vau1t11111111111111111111111111111111111");
+    assert!(ai::markdown(&tx).contains("Withdraw"));
+}
+
+#[test]
+fn curated_help_covers_the_errors_agents_hit() {
+    let anchor_help = |code: u32| anchor::lookup(code).map(|k| k.help).unwrap_or_default();
+    for code in [2015, 2021, 2500, 2501, 2502, 3003, 3008] {
+        assert!(!anchor_help(code).is_empty(), "anchor {code} has no help");
+    }
+    assert_eq!(anchor::lookup(3003).unwrap().class, Some(errors::Class::Layout));
+    for name in [
+        "InvalidAccountData",
+        "AccountDataTooSmall",
+        "PrivilegeEscalation",
+        "ProgramFailedToComplete",
+        "AccountNotRentExempt",
+        "MissingAccount",
+    ] {
+        let known = errors::solana::runtime(name).unwrap_or_else(|| panic!("{name} missing"));
+        assert!(!known.help.is_empty(), "runtime {name} has no help");
+    }
+    assert_eq!(
+        errors::solana::program(solana::TOKEN, 4).unwrap().class,
+        Some(errors::Class::Unauthorized)
+    );
+}
+
+#[test]
+fn pdas_are_derived_under_the_program_the_idl_names() {
+    // An ATA is a PDA of the Associated Token program, not of the program that
+    // takes it: deriving it under the wrong program would flag every ATA.
+    let owner = "BdHB1RVLPXjs1yvH1Nt1rMW4nNzBjSuRtsvBh5zm8BBA";
+    let mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    let (ata, _) = idl::find_program_address(
+        &[
+            &solana::bs58_decode(owner),
+            &solana::bs58_decode(solana::TOKEN),
+            &solana::bs58_decode(mint),
+        ],
+        &solana::bs58_decode(solana::ATA),
+    )
+    .unwrap();
+    let ata = solana::bs58_encode(&ata);
+    let value = json!({"result": {
+        "meta": {"err": {"InstructionError": [0, {"Custom": 2006}]}, "logMessages": [
+            format!("Program {owner} invoke [1]"),
+            format!("Program {owner} failed: custom program error: 0x7d6"),
+        ]},
+        "transaction": {"message": {
+            "header": {"numRequiredSignatures": 1, "numReadonlySignedAccounts": 0, "numReadonlyUnsignedAccounts": 0},
+            "accountKeys": [owner, mint, ata],
+            "instructions": [{"programIdIndex": 0, "accounts": [0, 1, 2], "data": ""}]
+        }}
+    }});
+    let tx2 = solana::parse("ata", "devnet", &value);
+    let specs = idl::account_specs(&json!([
+        {"name": "owner", "signer": true},
+        {"name": "mint"},
+        {"name": "owner_ata", "pda": {
+            "seeds": [
+                {"kind": "account", "path": "owner"},
+                {"kind": "const", "value": solana::bs58_decode(solana::TOKEN)},
+                {"kind": "account", "path": "mint"}
+            ],
+            "program": {"kind": "const", "value": solana::bs58_decode(solana::ATA)}
+        }}
+    ]));
+    assert!(
+        validate::declared_findings(&specs, &tx2.nodes[0]).is_empty(),
+        "the right ATA, derived under the ATA program"
+    );
+    // Without the program, the same seeds derive something else and it is flagged.
+    let mut local = specs.clone();
+    local[2].pda_program = None;
+    assert_eq!(validate::declared_findings(&local, &tx2.nodes[0]).len(), 1);
+}
+
+#[test]
+fn far_off_custom_codes_are_not_called_anchor_user_errors() {
+    let nodes = solana::parse("s", "devnet", &fixture()).nodes;
+    let failure = diagnose::failure(
+        &json!({"InstructionError": [0, {"Custom": 0xa5000000u32}]}),
+        &nodes,
+        &[],
+        0,
+        0,
+    )
+    .unwrap();
+    assert_eq!(failure.headline, "custom program error 2768240640");
+    assert!(
+        !note_texts(&failure).join(" ").contains("program-defined error"),
+        "{:?}",
+        note_texts(&failure)
+    );
+    let (name, _, _) = diagnose::infer_custom(0xa5000000, None);
+    assert_eq!(name, "custom program error 2768240640");
+    assert_eq!(anchor::user_code(6001), Some(1));
 }

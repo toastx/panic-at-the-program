@@ -193,6 +193,10 @@ pub struct AccountSpec {
     pub writable: bool,
     pub address: Option<String>,
     pub seeds: Option<Vec<Seed>>,
+    /// The program the PDA is derived under, when it is not this one: an ATA
+    /// is derived under the Associated Token program, a fee config under the
+    /// fee program. None means the instruction's own program.
+    pub pda_program: Option<Seed>,
 }
 
 #[derive(Clone, Debug)]
@@ -345,17 +349,20 @@ fn parse_anchor_account_spec(entry: &Value) -> AccountSpec {
         signer: flag("signer", "isSigner"),
         writable: flag("writable", "isMut"),
         address: entry["address"].as_str().map(str::to_string),
-        seeds: entry.pointer("/pda/seeds").and_then(Value::as_array).map(|seeds| {
-            seeds
-                .iter()
-                .filter_map(|seed| match seed["kind"].as_str()? {
-                    "const" => bytes_field(seed, "value").map(Seed::Const),
-                    "account" => Some(Seed::Account(seed["path"].as_str()?.to_string())),
-                    "arg" => Some(Seed::Arg(seed["path"].as_str()?.to_string())),
-                    _ => None,
-                })
-                .collect()
-        }),
+        seeds: entry
+            .pointer("/pda/seeds")
+            .and_then(Value::as_array)
+            .map(|seeds| seeds.iter().filter_map(anchor_seed).collect()),
+        pda_program: entry.pointer("/pda/program").and_then(anchor_seed),
+    }
+}
+
+fn anchor_seed(seed: &Value) -> Option<Seed> {
+    match seed["kind"].as_str()? {
+        "const" => bytes_field(seed, "value").map(Seed::Const),
+        "account" => Some(Seed::Account(seed["path"].as_str()?.to_string())),
+        "arg" => Some(Seed::Arg(seed["path"].as_str()?.to_string())),
+        _ => None,
     }
 }
 
@@ -446,6 +453,10 @@ fn parse_codama(value: &Value) -> Program {
                             .and_then(Value::as_str)
                             .map(str::to_string),
                         seeds: codama_seeds(account),
+                        pda_program: account
+                            .pointer("/defaultValue/programId")
+                            .and_then(Value::as_str)
+                            .map(|id| Seed::Const(bs58_decode(id))),
                     })
                     .collect(),
                 args: args
@@ -827,12 +838,16 @@ pub fn enrich(tx: &mut solana::Tx) {
     let logs = tx.logs[tx.nodes[node].logs.clone()].to_vec();
     let parsed = idl(&cluster, &program);
     // Resolved before the failure is borrowed mutably, and only when the account
-    // list is known to be whole: partial lists produce bogus findings.
-    let findings = if tx.accounts_complete {
-        super::validate::check(&cluster, tx, node)
-    } else {
-        Vec::new()
+    // list is known to be whole: partial lists produce bogus findings. A CPI
+    // that failed is checked twice: the callee's accounts, and the top-level
+    // instruction the user wrote, whose IDL declares what each one must be.
+    let top = tx.ancestors(node)[0];
+    let check = |index: usize| match tx.accounts_complete {
+        true => super::validate::check(&cluster, tx, index),
+        false => Vec::new(),
     };
+    let findings = check(node);
+    let caller = if top != node { check(top) } else { Vec::new() };
 
     let Some(failure) = tx.failure.as_mut() else { return };
     if let super::diagnose::Code::Custom(code) = failure.code {
@@ -842,5 +857,6 @@ pub fn enrich(tx: &mut solana::Tx) {
     let logged = super::diagnose::log_notes(&failure.code, &logs, cu, limit);
     failure.notes.extend(logged);
     super::diagnose::add_findings(failure, node, &findings);
-    tx.findings = findings;
+    super::diagnose::add_findings(failure, top, &caller);
+    tx.findings = findings.into_iter().chain(caller).collect();
 }

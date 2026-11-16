@@ -3,13 +3,13 @@
 1	InsufficientFunds	the source token account does not hold enough tokens	Insufficient	
 2	InvalidMint	the mint account is not a valid mint	Mint	
 3	MintMismatch	the token account belongs to a different mint	Mint	
-4	OwnerMismatch	the signer is not the owner or delegate of the token account		
-5	FixedSupply	the mint has a fixed supply and cannot mint more		
+4	OwnerMismatch	the signer is not the owner or delegate of the token account	Unauthorized	the authority passed is not the token account's owner or delegate — sign with the wallet that owns it
+5	FixedSupply	the mint has a fixed supply and cannot mint more		the mint has no mint authority left — no more tokens can be minted
 6	AlreadyInUse	the account is already initialized	Already	
 9	UninitializedState	the account has not been initialized	Uninitialized	
-10	NativeNotSupported	this instruction does not accept native SOL accounts		
-11	NonNativeHasBalance	the account still holds tokens and cannot be closed		
-13	InvalidState	the account is in an invalid state for this instruction		
+10	NativeNotSupported	this instruction does not accept native SOL accounts		this instruction does not work on wrapped SOL accounts
+11	NonNativeHasBalance	the account still holds tokens and cannot be closed		the token account still holds tokens — transfer or burn them before closing it
+13	InvalidState	the account is in an invalid state for this instruction		the account is not in a state this instruction accepts — check it is initialized and not frozen
 14	Overflow	the operation overflowed	Overflow	
 17	AccountFrozen	the token account is frozen	Paused	
 18	MintDecimalsMismatch	the decimals passed do not match the mint	Decimals	

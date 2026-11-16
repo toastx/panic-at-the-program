@@ -8,13 +8,13 @@ pub const NO_IDL_HINT: &str = "add the program's IDL to target/idl, or name the 
 pub fn infer_custom(code: u32, flavor: Option<crate::app::idl::Flavor>) -> (String, String, String) {
     use crate::app::idl::Flavor;
 
-    match flavor {
-        Some(Flavor::Anchor | Flavor::AnchorLegacy) if code >= anchor::USER_OFFSET => (
-            format!("Anchor user error #{}", code - anchor::USER_OFFSET),
+    match (flavor, anchor::user_code(code)) {
+        (Some(Flavor::Anchor | Flavor::AnchorLegacy), Some(index)) => (
+            format!("Anchor user error #{index}"),
             "the deployed program raised a code its IDL does not list".to_string(),
             "the on-chain IDL may be older than the deployed program — redeploy or refresh it".to_string(),
         ),
-        Some(Flavor::Anchor | Flavor::AnchorLegacy) => match anchor::lookup(code) {
+        (Some(Flavor::Anchor | Flavor::AnchorLegacy), None) => match anchor::lookup(code) {
             Some(known) => (
                 known.name.to_string(),
                 known.message.to_string(),
@@ -26,7 +26,7 @@ pub fn infer_custom(code: u32, flavor: Option<crate::app::idl::Flavor>) -> (Stri
                 "check the account constraints on the failing instruction".to_string(),
             ),
         },
-        Some(flavor @ (Flavor::Shank | Flavor::Codama)) => (
+        (Some(flavor @ (Flavor::Shank | Flavor::Codama)), _) => (
             format!("program error #{code}"),
             format!("{} programs number their errors from 0", flavor.label()),
             format!(
@@ -34,12 +34,12 @@ pub fn infer_custom(code: u32, flavor: Option<crate::app::idl::Flavor>) -> (Stri
                 ordinal(u64::from(code) + 1)
             ),
         ),
-        None if code >= anchor::USER_OFFSET => (
-            format!("Anchor user error #{}", code - anchor::USER_OFFSET),
+        (None, Some(index)) => (
+            format!("Anchor user error #{index}"),
             "a custom error from the program, unnamed without its IDL".to_string(),
             NO_IDL_HINT.to_string(),
         ),
-        None => (
+        (None, None) => (
             format!("custom program error {code}"),
             "a custom error from the program, unnamed without its IDL".to_string(),
             NO_IDL_HINT.to_string(),

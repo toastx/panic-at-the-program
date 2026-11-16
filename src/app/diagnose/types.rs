@@ -21,6 +21,7 @@ pub enum LogId {
     ClassInferred,
     CuExceeded,
     FlavorInferred,
+    HeapExhausted,
     LamportShortfall,
     NameLogged,
     NamePatpToml,
@@ -28,6 +29,7 @@ pub enum LogId {
     ProgramPanic,
     SignatureMissing,
     Slippage,
+    StackOverflow,
     ValueMismatch,
 }
 
@@ -40,6 +42,7 @@ impl LogId {
             Self::ClassInferred => "class.inferred",
             Self::CuExceeded => "cu.exceeded",
             Self::FlavorInferred => "flavor.inferred",
+            Self::HeapExhausted => "heap.exhausted",
             Self::LamportShortfall => "lamports.shortfall",
             Self::NameLogged => "name.logged",
             Self::NamePatpToml => "name.patp_toml",
@@ -47,6 +50,7 @@ impl LogId {
             Self::ProgramPanic => "program.panic",
             Self::SignatureMissing => "signature.missing",
             Self::Slippage => "slippage",
+            Self::StackOverflow => "stack.overflow",
             Self::ValueMismatch => "value.mismatch",
         }
     }
