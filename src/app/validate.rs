@@ -1,7 +1,11 @@
 use std::collections::HashMap;
 
+use super::diagnose::{DiagnosticId, LogId};
+use super::errors::Class;
 use super::idl;
-use super::solana::{self, ATA, AccountState, Node, SYSTEM, TOKEN, Tx, bs58_decode, bs58_encode};
+use super::solana::{
+    self, ATA, AccountState, Node, SYSTEM, TOKEN, TOKEN_2022, Tx, bs58_decode, bs58_encode, program_name, u64_at,
+};
 
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum Level {
@@ -20,6 +24,15 @@ pub enum FindingKind {
     PdaMismatch,
     NotAta,
     BelowRent,
+    AccountCount,
+    Missing,
+    Exists,
+    WrongOwner,
+    HoldsType,
+    TokenMint,
+    TokenOwner,
+    TokenShortfall,
+    Frozen,
 }
 
 #[derive(Clone, Debug)]
@@ -34,24 +47,47 @@ pub struct Finding {
     pub actual: Option<String>,
 }
 
+/// What the failure already says. The state checks look for the evidence that
+/// would confirm it, rather than reporting every fact about every account.
+#[derive(Default, Clone, Debug)]
+pub struct Context {
+    pub class: Option<Class>,
+    /// The `Left:`/`Right:` pair Anchor logged, when it did.
+    pub expected: Option<String>,
+    pub actual: Option<String>,
+}
+
 pub fn check(cluster: &str, tx: &Tx, index: usize) -> Vec<Finding> {
     let Some(node) = tx.nodes.get(index) else {
         return Vec::new();
     };
-    let decoded = idl::idl(cluster, &node.program)
-        .and_then(|idl| idl::instruction(&idl, &bs58_decode(&node.data)).map(|d| (idl, d)));
+    let idl = idl::idl(cluster, &node.program);
+    let decoded = idl
+        .as_ref()
+        .and_then(|idl| idl::instruction(idl, &bs58_decode(&node.data)));
 
     let mut findings = Vec::new();
     let mut roles = Vec::new();
-    if let Some((_, decoded)) = &decoded {
+    if let Some(decoded) = &decoded {
         roles = decoded.specs.iter().map(|spec| spec.name.clone()).collect();
         findings.extend(declared_findings(&decoded.specs, node));
     }
 
+    let context = tx.failure.as_ref().map_or_else(Context::default, |failure| {
+        let mismatch = failure
+            .notes
+            .iter()
+            .find(|note| note.id == DiagnosticId::Log(LogId::ValueMismatch));
+        Context {
+            class: failure.class,
+            expected: mismatch.and_then(|note| note.expected.clone()),
+            actual: mismatch.and_then(|note| note.actual.clone()),
+        }
+    });
     let keys: Vec<String> = node.accounts.iter().map(|a| a.key.clone()).collect();
     let state = solana::account_states(cluster, &keys);
     let rent = |size: usize| solana::rent_exempt_minimum(cluster, size);
-    findings.extend(state_findings(node, &roles, &state, rent));
+    findings.extend(state_findings(node, &roles, &state, rent, &context, idl.as_deref()));
     findings
 }
 
@@ -68,8 +104,29 @@ fn may_sign_via_cpi(node: &Node, key: &str) -> bool {
 }
 
 pub fn declared_findings(specs: &[idl::AccountSpec], node: &Node) -> Vec<Finding> {
-    if specs.len() != node.accounts.len() {
-        return Vec::new();
+    // Short by some: the positions past the gap mean nothing, so the one
+    // finding is the gap itself, naming what is probably missing. Long by some
+    // is `remaining_accounts`, and the declared prefix still checks.
+    if node.accounts.len() < specs.len() {
+        let missing: Vec<&str> = specs[node.accounts.len()..]
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect();
+        return vec![Finding {
+            index: node.accounts.len(),
+            role: String::new(),
+            key: String::new(),
+            kind: FindingKind::AccountCount,
+            level: Level::Error,
+            message: format!(
+                "the IDL declares {} accounts but {} were passed — missing: {}",
+                specs.len(),
+                node.accounts.len(),
+                missing.join(", ")
+            ),
+            expected: Some(format!("{} accounts", specs.len())),
+            actual: Some(node.accounts.len().to_string()),
+        }];
     }
     let mut findings = Vec::new();
     for (i, spec) in specs.iter().enumerate() {
@@ -138,15 +195,38 @@ pub fn declared_findings(specs: &[idl::AccountSpec], node: &Node) -> Vec<Finding
     findings
 }
 
+/// A Token `Transfer`, `Burn` or `TransferChecked` on `node`: the amount, its
+/// decimals when the instruction carries them, and which slot is the authority.
+fn token_spend(node: &Node) -> Option<(u64, Option<u32>, usize)> {
+    if node.program != TOKEN && node.program != TOKEN_2022 {
+        return None;
+    }
+    let bytes = bs58_decode(&node.data);
+    match bytes.first()? {
+        3 | 8 => Some((u64_at(&bytes, 1), None, 2)),
+        12 => Some((u64_at(&bytes, 1), bytes.get(9).map(|d| u32::from(*d)), 3)),
+        _ => None,
+    }
+}
+
+fn amount(raw: u64, decimals: Option<u32>) -> String {
+    match decimals {
+        Some(d) => format!("{}", raw as f64 / 10f64.powi(d as i32)),
+        None => raw.to_string(),
+    }
+}
+
 pub fn state_findings(
     node: &Node,
     roles: &[String],
     state: &HashMap<String, AccountState>,
     rent: impl Fn(usize) -> Option<u64>,
+    context: &Context,
+    idl: Option<&idl::Program>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
+    let spend = token_spend(node);
     for (i, account) in node.accounts.iter().enumerate() {
-        let Some(info) = state.get(&account.key) else { continue };
         let role = roles.get(i).cloned().unwrap_or_default();
         let finding = |kind, level, message: String, expected, actual| Finding {
             index: i,
@@ -159,9 +239,73 @@ pub fn state_findings(
             actual,
         };
 
-        if info.owner == TOKEN && info.data.len() == 165 {
+        let Some(info) = state.get(&account.key) else {
+            if context.class == Some(Class::Uninitialized) {
+                findings.push(finding(
+                    FindingKind::Missing,
+                    Level::Error,
+                    "does not exist on chain — nothing has created it yet".to_string(),
+                    None,
+                    None,
+                ));
+            }
+            continue;
+        };
+
+        // An `init` target is writable and never signs; the payer signs.
+        if context.class == Some(Class::Already) && account.writable && !account.signer {
+            findings.push(finding(
+                FindingKind::Exists,
+                Level::Error,
+                format!("already exists, owned by {}", program_name(&info.owner)),
+                None,
+                Some(program_name(&info.owner)),
+            ));
+        }
+
+        // With Anchor's Left/Right logged, only the account with that owner;
+        // without, the accounts the instruction writes to and does not own.
+        let blamed = match &context.actual {
+            Some(owner) => info.owner == *owner,
+            None => account.writable && info.owner != node.program,
+        };
+        if context.class == Some(Class::WrongOwner) && blamed {
+            findings.push(finding(
+                FindingKind::WrongOwner,
+                Level::Error,
+                format!("owned by {}", program_name(&info.owner)),
+                context.expected.as_deref().map(program_name),
+                Some(program_name(&info.owner)),
+            ));
+        }
+
+        if context.class == Some(Class::Layout)
+            && info.owner == node.program
+            && let Some(idl) = idl
+        {
+            findings.push(match idl::account(idl, &info.data) {
+                Some((name, _)) => finding(
+                    FindingKind::HoldsType,
+                    Level::Error,
+                    format!("holds a `{name}`"),
+                    None,
+                    Some(name),
+                ),
+                None => finding(
+                    FindingKind::HoldsType,
+                    Level::Error,
+                    format!("holds {} bytes that match no account type in the IDL", info.data.len()),
+                    None,
+                    None,
+                ),
+            });
+        }
+
+        if (info.owner == TOKEN || info.owner == TOKEN_2022) && info.data.len() == 165 {
             let mint = bs58_encode(&info.data[0..32]);
             let owner = bs58_encode(&info.data[32..64]);
+            let delegate = (u32::from_le_bytes(info.data[72..76].try_into().unwrap_or_default()) == 1)
+                .then(|| bs58_encode(&info.data[76..108]));
 
             if role.contains("associated") {
                 let ata = find_ata(&owner, &mint);
@@ -172,6 +316,56 @@ pub fn state_findings(
                         "not the associated token account for this owner and mint".to_string(),
                         ata,
                         Some(account.key.clone()),
+                    ));
+                }
+            }
+            if context.class == Some(Class::Mint) && context.actual.as_ref().is_none_or(|actual| *actual == mint) {
+                findings.push(finding(
+                    FindingKind::TokenMint,
+                    Level::Error,
+                    format!("holds mint {}", program_name(&mint)),
+                    context.expected.clone(),
+                    Some(mint.clone()),
+                ));
+            }
+            if info.data[108] == 2 {
+                findings.push(finding(
+                    FindingKind::Frozen,
+                    Level::Warn,
+                    "frozen — transfers and burns are blocked until the freeze authority thaws it".to_string(),
+                    None,
+                    None,
+                ));
+            }
+            // The source of a token spend: what it holds against what moves,
+            // and whether the authority passed may move it at all.
+            if i == 0
+                && let Some((moved, decimals, authority_slot)) = spend
+            {
+                let held = u64_at(&info.data, 64);
+                if moved > held {
+                    findings.push(finding(
+                        FindingKind::TokenShortfall,
+                        Level::Error,
+                        format!(
+                            "holds {} but the instruction moves {}",
+                            amount(held, decimals),
+                            amount(moved, decimals)
+                        ),
+                        Some(amount(moved, decimals)),
+                        Some(amount(held, decimals)),
+                    ));
+                }
+                if let Some(authority) = node.accounts.get(authority_slot)
+                    && authority.key != owner
+                    && delegate.as_deref() != Some(authority.key.as_str())
+                {
+                    findings.push(finding(
+                        FindingKind::TokenOwner,
+                        Level::Error,
+                        "the authority passed is neither this account's owner nor its delegate".to_string(),
+                        Some(owner.clone()),
+                        Some(authority.key.clone()),
                     ));
                 }
             }
@@ -210,18 +404,20 @@ fn unresolved_seed(spec: &idl::AccountSpec) -> Option<String> {
 }
 
 fn derive_pda(spec: &idl::AccountSpec, program: &str, specs: &[idl::AccountSpec], node: &Node) -> Option<String> {
-    let mut parts: Vec<Vec<u8>> = Vec::new();
-    for seed in spec.seeds.as_ref()? {
-        match seed {
-            idl::Seed::Const(bytes) => parts.push(bytes.clone()),
-            idl::Seed::Account(path) => {
-                let position = specs.iter().position(|s| s.name == *path)?;
-                parts.push(bs58_decode(&node.accounts.get(position)?.key));
-            }
-            idl::Seed::Arg(_) => return None,
+    let resolve = |seed: &idl::Seed| match seed {
+        idl::Seed::Const(bytes) => Some(bytes.clone()),
+        idl::Seed::Account(path) => {
+            let position = specs.iter().position(|s| s.name == *path)?;
+            Some(bs58_decode(&node.accounts.get(position)?.key))
         }
-    }
+        idl::Seed::Arg(_) => None,
+    };
+    let parts: Vec<Vec<u8>> = spec.seeds.as_ref()?.iter().map(resolve).collect::<Option<_>>()?;
+    let under = match &spec.pda_program {
+        Some(seed) => resolve(seed)?,
+        None => bs58_decode(program),
+    };
     let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
-    let (address, _) = idl::find_program_address(&refs, &bs58_decode(program))?;
+    let (address, _) = idl::find_program_address(&refs, &under)?;
     Some(bs58_encode(&address))
 }

@@ -9,6 +9,14 @@ const TSV: &str = include_str!("errors.tsv");
 /// program's own `#[error_code]` variants.
 pub const USER_OFFSET: u32 = 6000;
 
+/// The program's own error index behind `code`, when it is one. An error enum
+/// does not run to thousands of variants, so a code far past the offset is
+/// some other program's numbering — `0xa5000000` is not Anchor user error
+/// #2768234640.
+pub fn user_code(code: u32) -> Option<u32> {
+    code.checked_sub(USER_OFFSET).filter(|index| *index < 0x1000)
+}
+
 /// Parsed rows of [`TSV`]. Public so tests can assert the file is whole.
 pub fn rows() -> impl Iterator<Item = (u32, Known)> {
     coded(TSV)

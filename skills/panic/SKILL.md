@@ -64,6 +64,7 @@ Read it in this order: `action`, then `fix`, then any `accounts[].findings`. A f
 | `requote_and_retry` | Fetch a fresh quote or price, rebuild, and resend. Widen the slippage tolerance only if the user allows it. |
 | `fund_account` | On localnet or devnet, airdrop to the account or fund it. On mainnet, stop and ask the user. Never move the user's funds on your own. |
 | `stop_and_report` | Do not resend. Tell the user what failed, such as which signer is missing. |
+| `deploy_program` | Nothing is deployed at that program id on this cluster. On localnet, run `anchor deploy` (or `anchor test`, which deploys first). Elsewhere, check the program id and the cluster. |
 | `fix_transaction` | The transaction or the program is wrong. Edit the code using `fix`, `error.account`, `error.source`, the findings, and the notes. |
 | `send` | Only from `simulate`: the transaction succeeded in simulation and is safe to send. |
 

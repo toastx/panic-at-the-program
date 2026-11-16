@@ -192,7 +192,7 @@ pub fn bs58_decode(input: &str) -> Vec<u8> {
     bytes
 }
 
-pub(super) fn u64_at(data: &[u8], offset: usize) -> u64 {
+pub fn u64_at(data: &[u8], offset: usize) -> u64 {
     data.get(offset..offset + 8)
         .map(|slice| u64::from_le_bytes(slice.try_into().unwrap_or([0; 8])))
         .unwrap_or(0)

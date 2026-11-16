@@ -37,28 +37,28 @@ ProgramExecutionTemporarilyRestricted	program execution is temporarily restricte
 UnbalancedTransaction	the total balance before the transaction does not equal the total balance after the transaction		
 ProgramCacheHitMaxLimit	program cache hit max limit		
 CommitCancelled	commit cancelled internally		
-InvalidArgument	the runtime rejected an argument		
+InvalidArgument	the runtime rejected an argument		the program rejected an argument — check the instruction data against what the deployed program expects
 InvalidInstructionData	an instruction's data contents were invalid	Instruction	the program could not decode the instruction data — regenerate the client from the deployed IDL
-InvalidAccountData	the program rejected an account's data		
-AccountDataTooSmall	the account's data is smaller than required		
+InvalidAccountData	the program rejected an account's data		an account's data is not what the program expects — the wrong account, an uninitialized one, or a stale layout
+AccountDataTooSmall	the account's data is smaller than required		the account is smaller than the program needs — allocate it with the right space, or realloc
 InsufficientFunds	an account does not hold enough lamports	Insufficient	
 IncorrectProgramId	the account did not have the expected program id	Address	the account is not owned by the program this instruction expects — check you passed the right one
 MissingRequiredSignature	an account that must sign did not sign	NotSigner	
 AccountAlreadyInitialized	an initialize instruction was sent to an account that has already been initialized	Already	the account is already initialised — change the seed, or use init_if_needed
 UninitializedAccount	an attempt to operate on an account that hasn't been initialized	Uninitialized	run the instruction that creates this account before using it
-UnbalancedInstruction	program's instruction lamport balance does not equal the balance after the instruction		
-ModifiedProgramId	program illegally modified an account's program id		
-ExternalAccountLamportSpend	program spent the lamports of an account that doesn't belong to it		
+UnbalancedInstruction	program's instruction lamport balance does not equal the balance after the instruction		lamports were created or destroyed — every debit needs a matching credit within the instruction
+ModifiedProgramId	program illegally modified an account's program id		the program changed the owner of an account it does not own — only the owner program can assign
+ExternalAccountLamportSpend	program spent the lamports of an account that doesn't belong to it		the program debited an account it does not own — only the owner can; transfer through the System Program with the owner signing
 ExternalAccountDataModified	program modified the data of an account that doesn't belong to it		
 ReadonlyLamportChange	read-only account's lamports modified	NotWritable	the program moved lamports on an account passed read-only — pass it as writable
 ReadonlyDataModified	read-only account's data was modified	NotWritable	the program wrote to an account passed read-only — pass it as writable
 DuplicateAccountIndex			the same account index is repeated where the runtime requires distinct ones
-ExecutableModified	executable bit on account changed, but shouldn't have		
+ExecutableModified	executable bit on account changed, but shouldn't have		the program changed an account's executable flag — not allowed
 RentEpochModified	rent_epoch account changed, but shouldn't have		
 NotEnoughAccountKeys	the instruction expected additional account keys	Instruction	fewer accounts were passed than the instruction requires
 AccountDataSizeChanged	program other than the account's owner changed the size of the account data		
 AccountNotExecutable	the instruction expected an executable account	Address	the instruction wants a program here, but this account is not executable
-AccountBorrowFailed	the program borrowed the same account twice		
+AccountBorrowFailed	the program borrowed the same account twice		the same account was borrowed twice — the same key passed in two slots, or a nested borrow in the program
 DuplicateAccountOutOfSync	the same account was multiply passed to an on-chain program's entrypoint, but the program modified them differently		
 InvalidError	the return value from the program was invalid		
 ExecutableDataModified	executable account's data was modified		
@@ -66,25 +66,25 @@ ExecutableLamportChange	executable account's lamports modified
 ExecutableAccountNotRentExempt	executable accounts must be rent exempt	Rent	the program account is below the rent-exempt minimum — fund it
 UnsupportedProgramId	unsupported program id	Address	that address is not an executable program on this cluster
 CallDepth	cross-program invocation call depth too deep		the CPI chain is deeper than the runtime allows — flatten the calls
-MissingAccount	an account required by the instruction is missing		
+MissingAccount	an account required by the instruction is missing	Instruction	an account the instruction needs was not passed — check the account list against what the program expects
 ReentrancyNotAllowed	cross-program invocation reentrancy not allowed for this instruction		a program re-entered itself through a CPI — restructure so it is called once
 MaxSeedLengthExceeded	length of the seed is too long for address generation	Seeds	a seed is over 32 bytes — hash it before passing it as a seed
 InvalidSeeds	provided seeds do not result in a valid address	Seeds	re-derive the PDA: same seeds, same bump, same program id
 InvalidRealloc	failed to reallocate account data of this length		the realloc exceeds what one instruction may add — grow the account over several instructions
 ComputationalBudgetExceeded	the instruction ran out of compute units		
-PrivilegeEscalation	a CPI asked for more privileges than the caller had		
-ProgramEnvironmentSetupFailure	the program could not be loaded		
-ProgramFailedToComplete	the program aborted — panic, unwrap, or compute exhaustion		
+PrivilegeEscalation	a CPI asked for more privileges than the caller had		a CPI passed an account as signer or writable that the caller had no right to — invoke_signed with the right seeds, or mark it signer/mut on the outer instruction
+ProgramEnvironmentSetupFailure	the program could not be loaded		the program could not be loaded — on localnet it is usually not deployed, or built for a different SBF toolchain; redeploy
+ProgramFailedToComplete	the program aborted — panic, unwrap, or compute exhaustion		the program aborted — the last program log lines say why: a panic, compute, stack or heap
 ProgramFailedToCompile	program failed to compile		the deployed program is not a loadable BPF binary — rebuild and redeploy
 Immutable	account is immutable		the account is immutable — it cannot be changed after creation
 IncorrectAuthority	incorrect authority provided	Unauthorized	the signer is not the authority this account stores
 BorshIoError	failed to serialize or deserialize account data		the program could not (de)serialize account data — check the struct matches the deployed layout
-AccountNotRentExempt	an account was left below the rent-exempt minimum	Rent	
+AccountNotRentExempt	an account was left below the rent-exempt minimum	Rent	the instruction left the account below the rent-exempt minimum — fund it, or move less out of it
 InvalidAccountOwner	invalid account owner	WrongOwner	the account's owner is not the program the instruction expects
 ArithmeticOverflow	program arithmetic overflowed	Overflow	the program's arithmetic wrapped — check the amount against the decimals
 UnsupportedSysvar	unsupported sysvar		
 IllegalOwner	illegal account owner	WrongOwner	the account's owner is not the program the runtime requires here
 MaxAccountsDataAllocationsExceeded	accounts data allocations exceeded the maximum allowed per transaction		the transaction allocates more account data than one transaction may — split the allocations
-MaxAccountsExceeded	max accounts exceeded		
+MaxAccountsExceeded	max accounts exceeded		too many accounts in the transaction — split it, or use an address lookup table
 MaxInstructionTraceLengthExceeded	max instruction trace length exceeded		
 BuiltinProgramsMustConsumeComputeUnits	builtin programs must consume compute units		

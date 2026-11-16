@@ -79,9 +79,15 @@ On a transaction, `a` opens a menu:
 - `c` copies the diagnosis as markdown — the error and what it means, the notes with their tiers, the failing instruction, the CPI tree with compute units, the failing frame's logs, and the account list. The copy goes through an OSC 52 escape, so it reaches your clipboard over SSH too.
 - `o` opens your agent in a new terminal window with that markdown as its opening prompt, in the directory you ran `panic` from. The TUI stays open. tmux, WezTerm, Ghostty, kitty, iTerm and Terminal.app are supported, plus `x-terminal-emulator` / `gnome-terminal` on Linux; anywhere else it copies the diagnosis instead.
 
-### For agents: JSON and MCP
+### For agents: skill, JSON and MCP
 
-Agents can call panic directly instead of reading a pasted export:
+Install the skill so your coding agent (Claude Code, Codex, Cursor, ...) reaches for panic whenever a Solana transaction or test fails, and knows what to do with each `action`:
+
+```sh
+npx skills add toastx/panic-at-the-program
+```
+
+It lives in [`skills/panic/SKILL.md`](skills/panic/SKILL.md). Agents can also call panic directly instead of reading a pasted export:
 
 ```sh
 panic diagnose <signature> [cluster] --json    # a failed transaction, as JSON

@@ -38,8 +38,9 @@ classes! {
     Ata ["associated", "ata"] "this is not the associated token account for that owner and mint";
     Decimals ["decimals"] "the decimals passed do not match the mint";
     Expired ["expired", "stale", "deadline", "timeout"] "past its validity window — refresh it and resend";
-    Instruction ["instruction", "discriminator", "fallback"] "the deployed program does not recognise this instruction — redeploy, or regenerate the client from the deployed IDL";
+    Instruction ["instruction", "fallback"] "the deployed program does not recognise this instruction — redeploy, or regenerate the client from the deployed IDL";
     Insufficient ["insufficient", "funds", "liquidity"] "the source does not hold enough — check the amount against the live balance";
+    Layout ["discriminator", "layout", "deserialize"] "the account's data is not the type the instruction expects — the wrong account was passed, or its layout changed since it was written; on localnet close and re-init it";
     Mint ["mint"] "the token account's mint does not match the one the instruction expects";
     NotSigner ["signer", "sign", "signature"] "add the missing signer to the transaction";
     NotWritable ["writable", "mutable", "readonly"] "the account must be passed as writable";

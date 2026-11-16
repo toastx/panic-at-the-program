@@ -8,7 +8,7 @@ pub const TOKEN_2022: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
 pub const ATA: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 
-pub(super) fn program_name(id: &str) -> String {
+pub fn program_name(id: &str) -> String {
     if let Some(label) = crate::workspace::value("programs", id) {
         return label;
     }

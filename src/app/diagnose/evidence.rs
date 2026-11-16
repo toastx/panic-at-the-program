@@ -10,7 +10,7 @@ use crate::app::validate::{Finding, FindingKind, Level};
 /// anything, corroborates it. Only semantically tight pairs are listed — an
 /// address mismatch does not imply prior existence, and an ATA mismatch does
 /// not imply a wrong mint, so promoting those would state a guess as a fix.
-fn corroborates(class: Class, kind: FindingKind) -> bool {
+pub fn corroborates(class: Class, kind: FindingKind) -> bool {
     match class {
         Class::Seeds => kind == FindingKind::PdaMismatch,
         Class::NotSigner => kind == FindingKind::NotSigner,
@@ -18,18 +18,16 @@ fn corroborates(class: Class, kind: FindingKind) -> bool {
         Class::Rent => kind == FindingKind::BelowRent,
         Class::Address => kind == FindingKind::AddressMismatch,
         Class::Ata => kind == FindingKind::NotAta,
-        Class::Already
-        | Class::Decimals
-        | Class::Expired
-        | Class::Instruction
-        | Class::Insufficient
-        | Class::Mint
-        | Class::Overflow
-        | Class::Paused
-        | Class::Slippage
-        | Class::Unauthorized
-        | Class::Uninitialized
-        | Class::WrongOwner => false,
+        Class::Already => kind == FindingKind::Exists,
+        Class::Instruction => kind == FindingKind::AccountCount,
+        Class::Insufficient => kind == FindingKind::TokenShortfall,
+        Class::Layout => kind == FindingKind::HoldsType,
+        Class::Mint => kind == FindingKind::TokenMint,
+        Class::Paused => kind == FindingKind::Frozen,
+        Class::Unauthorized => kind == FindingKind::TokenOwner,
+        Class::Uninitialized => kind == FindingKind::Missing,
+        Class::WrongOwner => kind == FindingKind::WrongOwner,
+        Class::Decimals | Class::Expired | Class::Overflow | Class::Slippage => false,
     }
 }
 

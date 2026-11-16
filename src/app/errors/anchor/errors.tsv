@@ -5,7 +5,7 @@
 103	InstructionDidNotSerialize	The program could not serialize the given instruction	Instruction	
 1000	IdlInstructionStub	The program was compiled without idl instructions		
 1001	IdlInstructionInvalidProgram	Invalid program given to the IDL instruction		
-1002	IdlAccountNotEmpty	IDL Account must be empty in order to resize		
+1002	IdlAccountNotEmpty	IDL Account must be empty in order to resize		the IDL account already holds data — close it first, or use `anchor idl upgrade`
 1500	EventInstructionStub	The program was compiled without `event-cpi` feature		
 2000	ConstraintMut	A mut constraint was violated	NotWritable	
 2001	ConstraintHasOne	A has one constraint was violated		compare the key stored on the account with the account you passed
@@ -14,23 +14,23 @@
 2004	ConstraintOwner	An owner constraint was violated	WrongOwner	
 2005	ConstraintRentExempt	A rent exemption constraint was violated	Rent	
 2006	ConstraintSeeds	A seeds constraint was violated	Seeds	
-2007	ConstraintExecutable	An executable constraint was violated		
+2007	ConstraintExecutable	An executable constraint was violated		the account passed as a program is not executable — pass the program id, not an account it owns
 2008	ConstraintState	Deprecated Error, feel free to replace with something else		
 2009	ConstraintAssociated	An associated constraint was violated	Ata	
 2010	ConstraintAssociatedInit	An associated init constraint was violated	Ata	
-2011	ConstraintClose	A close constraint was violated		
+2011	ConstraintClose	A close constraint was violated		the close target is the account being closed — close it to a different account, usually the payer
 2012	ConstraintAddress	An address constraint was violated	Address	
 2013	ConstraintZero	Expected zero account discriminant		the account must be zeroed before this instruction can initialise it
 2014	ConstraintTokenMint	A token mint constraint was violated	Mint	
-2015	ConstraintTokenOwner	A token owner constraint was violated		
+2015	ConstraintTokenOwner	A token owner constraint was violated	Unauthorized	the token account's owner is not the account the constraint names — pass the token account that belongs to that owner
 2016	ConstraintMintMintAuthority	A mint mint authority constraint was violated	Unauthorized	
 2017	ConstraintMintFreezeAuthority	A mint freeze authority constraint was violated	Unauthorized	
 2018	ConstraintMintDecimals	A mint decimals constraint was violated	Decimals	
 2019	ConstraintSpace	A space constraint was violated		the `space = ..` on the account does not match what the type needs
-2020	ConstraintAccountIsNone	A required account for the constraint is None		
-2021	ConstraintTokenTokenProgram	A token account token program constraint was violated		
-2022	ConstraintMintTokenProgram	A mint token program constraint was violated		
-2023	ConstraintAssociatedTokenTokenProgram	A mint token program constraint was violated		
+2020	ConstraintAccountIsNone	A required account for the constraint is None		an optional account the constraint depends on was not passed — pass it
+2021	ConstraintTokenTokenProgram	A token account token program constraint was violated		the token account belongs to the other token program — pass Token-2022 for a Token-2022 account, and Token for a classic one
+2022	ConstraintMintTokenProgram	A mint token program constraint was violated		the mint belongs to the other token program — match token_program to the mint's owner
+2023	ConstraintAssociatedTokenTokenProgram	A mint token program constraint was violated		the associated token account belongs to the other token program — match token_program to its owner
 2024	ConstraintMintGroupPointerExtension	A group pointer extension constraint was violated		
 2025	ConstraintMintGroupPointerExtensionAuthority	A group pointer extension authority constraint was violated		
 2026	ConstraintMintGroupPointerExtensionGroupAddress	A group pointer extension group address constraint was violated		
@@ -47,22 +47,22 @@
 2037	ConstraintMintTransferHookExtension	A transfer hook extension constraint was violated		
 2038	ConstraintMintTransferHookExtensionAuthority	A transfer hook extension authority constraint was violated		
 2039	ConstraintMintTransferHookExtensionProgramId	A transfer hook extension transfer hook program id constraint was violated		
-2500	RequireViolated	A require expression was violated		
-2501	RequireEqViolated	A require_eq expression was violated		
-2502	RequireKeysEqViolated	A require_keys_eq expression was violated		
-2503	RequireNeqViolated	A require_neq expression was violated		
-2504	RequireKeysNeqViolated	A require_keys_neq expression was violated		
-2505	RequireGtViolated	A require_gt expression was violated		
-2506	RequireGteViolated	A require_gte expression was violated		
+2500	RequireViolated	A require expression was violated		a `require!` in the program failed — see where it was thrown and the program's own message
+2501	RequireEqViolated	A require_eq expression was violated		a `require_eq!` failed — compare the Left and Right values logged
+2502	RequireKeysEqViolated	A require_keys_eq expression was violated		a `require_keys_eq!` failed — the Left key passed is not the Right key the program expects
+2503	RequireNeqViolated	A require_neq expression was violated		a `require_neq!` failed — the two values logged must differ
+2504	RequireKeysNeqViolated	A require_keys_neq expression was violated		a `require_keys_neq!` failed — the two keys logged must differ
+2505	RequireGtViolated	A require_gt expression was violated		a `require_gt!` failed — Left must be greater than Right
+2506	RequireGteViolated	A require_gte expression was violated		a `require_gte!` failed — Left must be at least Right
 3000	AccountDiscriminatorAlreadySet	The account discriminator was already set on this account	Already	
 3001	AccountDiscriminatorNotFound	No discriminator was found on the account	Uninitialized	
-3002	AccountDiscriminatorMismatch	Account discriminator did not match what was expected		the account is a different type than expected — check you passed the right one
-3003	AccountDidNotDeserialize	Failed to deserialize the account		
+3002	AccountDiscriminatorMismatch	Account discriminator did not match what was expected	Layout	the account is a different type than expected — check you passed the right one
+3003	AccountDidNotDeserialize	Failed to deserialize the account	Layout	the account's bytes do not fit the type — the wrong account, or a layout that changed since it was written; on localnet close and re-init it
 3004	AccountDidNotSerialize	Failed to serialize the account		
 3005	AccountNotEnoughKeys	Not enough account keys given to the instruction		fewer accounts were passed than the instruction requires
 3006	AccountNotMutable	The given account is not mutable	NotWritable	
 3007	AccountOwnedByWrongProgram	The given account is owned by a different program than expected	WrongOwner	
-3008	InvalidProgramId	Program ID was not as expected		
+3008	InvalidProgramId	Program ID was not as expected		the program account passed is not the one expected — check the program id, and that it is deployed on this cluster
 3009	InvalidProgramExecutable	Program account is not executable		
 3010	AccountNotSigner	The given account did not sign	NotSigner	
 3011	AccountNotSystemOwned	The given account is not owned by the system program	WrongOwner	
@@ -70,9 +70,9 @@
 3013	AccountNotProgramData	The given account is not a program data account		
 3014	AccountNotAssociatedTokenAccount	The given account is not the associated token account	Ata	
 3015	AccountSysvarMismatch	The given public key does not match the required sysvar		
-3016	AccountReallocExceedsLimit	The account reallocation exceeds the MAX_PERMITTED_DATA_INCREASE limit		
+3016	AccountReallocExceedsLimit	The account reallocation exceeds the MAX_PERMITTED_DATA_INCREASE limit		a realloc grew the account by more than 10 KB in one instruction — grow it in steps
 3017	AccountDuplicateReallocs	The account was duplicated for more than one reallocation		
 4100	DeclaredProgramIdMismatch	The declared program id does not match actual program id		declare_id! does not match the deployed program — redeploy or fix the id
 4101	TryingToInitPayerAsProgramAccount	You cannot/should not initialize the payer account as a program account		the payer cannot also be the account being initialised
 4102	InvalidNumericConversion	Invalid numeric conversion error	Overflow	
-5000	Deprecated	The API being used is deprecated and should no longer be used		
+5000	Deprecated	The API being used is deprecated and should no longer be used		the program uses a deprecated Anchor API — see the Anchor changelog for the replacement

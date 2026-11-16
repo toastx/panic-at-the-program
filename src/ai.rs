@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
 
-use crate::app::diagnose::{Confidence, DiagnosticId, Failure, LogId, Tier};
+use crate::app::diagnose::{Confidence, DiagnosticId, Failure, LogId, Note, Tier, corroborates};
 use crate::app::errors::Class;
 use crate::app::idl;
 use crate::app::solana::{self, ATA, Node, SYSTEM, Status, TOKEN, TOKEN_2022, Tx, base64_encode, bs58_decode};
@@ -277,7 +277,7 @@ fn tree(tx: &Tx) -> Vec<String> {
 /// plumbing, unless the error or a finding points at it. Without a failing
 /// instruction, every account the transaction loaded, minus the same plumbing.
 fn accounts(tx: &Tx) -> Vec<String> {
-    let Some(node) = failing(tx).map(|index| &tx.nodes[index]) else {
+    let Some((index, node)) = failing(tx).map(|index| (index, &tx.nodes[index])) else {
         return tx
             .accounts
             .iter()
@@ -286,6 +286,7 @@ fn accounts(tx: &Tx) -> Vec<String> {
             .collect();
     };
     let decoded = decoded(tx, node);
+    let names = names(tx, index);
     let blamed = tx.failure.as_ref().and_then(|failure| failure.account.as_deref());
 
     let mut out = Vec::new();
@@ -301,10 +302,7 @@ fn accounts(tx: &Tx) -> Vec<String> {
         ));
     }
     for (index, account) in node.accounts.iter().enumerate() {
-        let name = decoded
-            .as_ref()
-            .and_then(|decoded| decoded.specs.get(index))
-            .map(|spec| spec.name.as_str());
+        let name = names[index].as_deref();
         let findings: Vec<&str> = tx
             .findings
             .iter()
@@ -331,6 +329,28 @@ fn accounts(tx: &Tx) -> Vec<String> {
 /// declared account specs by position.
 fn decoded(tx: &Tx, node: &Node) -> Option<idl::Decoded> {
     idl::idl(&tx.cluster, &node.program).and_then(|idl| idl::instruction(&idl, &bs58_decode(&node.data)))
+}
+
+/// Each account's IDL name, by position: from this instruction's own IDL, or
+/// failing that from the top-level instruction that called it, matched by key.
+/// A CPI hands the callee the caller's accounts, in its own order.
+fn names(tx: &Tx, index: usize) -> Vec<Option<String>> {
+    let node = &tx.nodes[index];
+    if let Some(decoded) = decoded(tx, node) {
+        return (0..node.accounts.len())
+            .map(|i| decoded.specs.get(i).map(|spec| spec.name.clone()))
+            .collect();
+    }
+    let top = tx.ancestors(index)[0];
+    let caller = (top != index).then(|| decoded(tx, &tx.nodes[top])).flatten();
+    node.accounts
+        .iter()
+        .map(|account| {
+            let caller = caller.as_ref()?;
+            let position = tx.nodes[top].accounts.iter().position(|a| a.key == account.key)?;
+            caller.specs.get(position).map(|spec| spec.name.clone())
+        })
+        .collect()
 }
 
 fn tier(tier: Tier) -> &'static str {
@@ -408,7 +428,11 @@ fn action(id: &DiagnosticId, class: Option<Class>) -> Option<(&'static str, bool
     Some(match id {
         // Write-lock contention with another transaction: it clears on its own.
         DiagnosticId::Runtime(name) if name == "AccountInUse" => ("retry", true),
+        DiagnosticId::Runtime(name) if name == "ProgramAccountNotFound" => ("deploy_program", false),
         DiagnosticId::Log(LogId::CuExceeded) => ("raise_compute_and_retry", true),
+        DiagnosticId::Log(LogId::ProgramPanic | LogId::StackOverflow | LogId::HeapExhausted) => {
+            ("fix_transaction", false)
+        }
         DiagnosticId::Log(LogId::Slippage) => ("requote_and_retry", true),
         DiagnosticId::Log(LogId::LamportShortfall) => ("fund_account", false),
         DiagnosticId::Log(LogId::SignatureMissing) => ("stop_and_report", false),
@@ -463,16 +487,35 @@ pub fn json(tx: &Tx) -> Value {
                 .find(|note| note.id == DiagnosticId::Log(LogId::ClassInferred))
         })
         .map(|note| note.confidence);
-    let fix = [Tier::Fix, Tier::Help]
+    // The finding that confirms the error's class is the fix; failing that,
+    // any fix, then the generic help.
+    let confirms = |note: &&Note| match (&note.id, failure.class) {
+        (DiagnosticId::Finding { kind, .. }, Some(class)) => corroborates(class, *kind),
+        _ => false,
+    };
+    let fix = failure
+        .notes
         .iter()
-        .find_map(|&wanted| failure.notes.iter().find(|note| note.tier == wanted))
+        .find(confirms)
+        .or_else(|| failure.notes.iter().find(|note| note.tier == Tier::Fix))
+        .or_else(|| failure.notes.iter().find(|note| note.tier == Tier::Help))
         .map(|note| note.text.clone());
 
     let node = failure.node.map(|index| &tx.nodes[index]);
-    let specs = node
-        .and_then(|node| decoded(tx, node))
-        .map(|decoded| decoded.specs)
-        .unwrap_or_default();
+    let names = failure.node.map(|index| names(tx, index)).unwrap_or_default();
+    // The instruction the user wrote, when the failure is inside a CPI it made.
+    let caller = failure
+        .node
+        .map(|index| tx.ancestors(index)[0])
+        .filter(|top| Some(*top) != failure.node)
+        .map(|top| &tx.nodes[top])
+        .map(|top| {
+            json!({
+                "instruction": top.name.clone().unwrap_or_else(|| top.label.clone()),
+                "instruction_path": top.path,
+                "program": top.program,
+            })
+        });
     let accounts: Vec<Value> = node
         .map_or(&tx.accounts, |node| &node.accounts)
         .iter()
@@ -480,7 +523,7 @@ pub fn json(tx: &Tx) -> Value {
         .map(|(index, account)| {
             json!({
                 "index": index,
-                "name": specs.get(index).map(|spec| &spec.name),
+                "name": names.get(index).cloned().flatten(),
                 "key": account.key,
                 "signer": account.signer,
                 "writable": account.writable,
@@ -527,6 +570,7 @@ pub fn json(tx: &Tx) -> Value {
         "instruction": node.map(|node| node.name.clone().unwrap_or_else(|| node.label.clone())),
         "instruction_path": node.map(|node| &node.path),
         "program": node.map(|node| &node.program),
+        "caller": caller,
         "fix": fix,
         "accounts": accounts,
         "notes": notes,
@@ -538,9 +582,6 @@ pub fn json(tx: &Tx) -> Value {
 /// Diagnoses an unsent transaction, given as base64 or base58, by simulating it.
 /// A failure takes the same path as one the rpc tap recorded.
 pub fn simulate(cluster: &str, transaction: &str) -> Result<Value, Box<dyn std::error::Error>> {
-    // base58 is a subset of base64's alphabet, so only a message that decodes
-    // shows which encoding it was. Anything else goes to the RPC as base64: it
-    // reads formats our decoder does not (v1), and it says why when it cannot.
     let bytes = bs58_decode(transaction);
     let transaction = match solana::decode_message(&solana::base64_decode(transaction)) {
         None if solana::decode_message(&bytes).is_some() => base64_encode(&bytes),

@@ -71,6 +71,10 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
     // The program's own words beat our table when it logged them.
     let logs_slice = node.and_then(|i| logs.get(nodes[i].logs.clone())).unwrap_or(logs);
     let anchor = anchor::log(logs_slice);
+    // A panic names its line and, for arithmetic, its class; the runtime's
+    // `ProgramFailedToComplete` says neither.
+    let panicked = panic(logs_slice);
+    let class = class.or_else(|| panicked.as_ref()?.advice().1);
     // A name is only trustworthy alongside a number: that pair means a real
     // AnchorError line rather than a stray log.
     if anchor.number.is_some()
@@ -90,16 +94,13 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
     }
     // Dropped by idl::enrich once the IDL names the code.
     if let Code::Custom(n) = code
-        && n >= anchor::USER_OFFSET
+        && let Some(index) = anchor::user_code(n)
         && errors::anchor_applies(program)
     {
         notes.push(Note::new(
             DiagnosticId::Log(LogId::AnchorUserRange),
             Tier::Note,
-            format!(
-                "program-defined error #{} — check the program's error enum",
-                n - anchor::USER_OFFSET
-            ),
+            format!("program-defined error #{index} — check the program's error enum"),
         ));
     }
     // Superseded by the IDL's declared signer roles, when there are any.
@@ -126,7 +127,7 @@ pub fn failure(err: &Value, nodes: &[Node], logs: &[String], cu: u32, cu_limit: 
         meaning,
         class,
         account: anchor.account,
-        source: anchor.source,
+        source: anchor.source.or_else(|| panicked?.source),
         notes,
     })
 }
@@ -181,10 +182,10 @@ fn describe(code: &Code, program: &str) -> (DiagnosticId, String, String, Option
                     "an entry in the program's own error enum",
                 );
             }
-            if *n >= anchor::USER_OFFSET {
+            if let Some(index) = anchor::user_code(*n) {
                 return unknown(
                     scoped,
-                    format!("Anchor user error #{}", n - anchor::USER_OFFSET),
+                    format!("Anchor user error #{index}"),
                     "defined by the program itself; the IDL carries its name and message",
                 );
             }
