@@ -9,10 +9,7 @@ const TSV: &str = include_str!("errors.tsv");
 /// program's own `#[error_code]` variants.
 pub const USER_OFFSET: u32 = 6000;
 
-/// The program's own error index behind `code`, when it is one. An error enum
-/// does not run to thousands of variants, so a code far past the offset is
-/// some other program's numbering — `0xa5000000` is not Anchor user error
-/// #2768234640.
+/// The `#[error_code]` index, if `code` is one; no enum runs to 4096 variants.
 pub fn user_code(code: u32) -> Option<u32> {
     code.checked_sub(USER_OFFSET).filter(|index| *index < 0x1000)
 }

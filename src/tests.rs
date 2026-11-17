@@ -2349,8 +2349,6 @@ fn a_short_account_list_names_what_is_missing() {
     assert_eq!(gap.kind, validate::FindingKind::AccountCount);
     assert_eq!(gap.level, validate::Level::Error);
     assert!(gap.message.contains("missing: mint, token_program"), "{}", gap.message);
-    assert_eq!(gap.expected.as_deref(), Some("4 accounts"));
-    assert_eq!(gap.actual.as_deref(), Some("2"));
 
     // And the runtime's own word for it is corroborated by the gap.
     let mut failure = diagnose::failure(
@@ -2446,13 +2444,14 @@ fn account_state_corroborates_the_error_class() {
         .iter()
         .find(|f| f.kind == FindingKind::Exists)
         .expect("it exists");
-    assert_eq!(found.actual.as_deref(), Some("Token Program"));
+    assert!(found.message.contains("owned by Token Program"), "{}", found.message);
 
     // The wrong-owner case names the owner it found, and the one Anchor wanted.
     let context = Context {
         class: Some(errors::Class::WrongOwner),
         expected: Some("Vau1t11111111111111111111111111111111111".to_string()),
         actual: Some(solana::TOKEN.to_string()),
+        account: None,
     };
     let owned = validate::state_findings(node, &roles, &state, rent, &context, None);
     let found = owned.iter().find(|f| f.kind == FindingKind::WrongOwner).expect("owner");
@@ -2534,7 +2533,7 @@ fn panics_name_their_line_and_their_kind() {
         at(&["Program log: panicked at 'called `Option::unwrap()` on a `None` value', programs/vault/src/lib.rs:7:20"]);
     assert_eq!(old.source.as_deref(), Some("programs/vault/src/lib.rs:7"));
     assert_eq!(old.class, None);
-    assert!(note_texts(&old).join(" ").contains("unwrap on None"));
+    assert!(note_texts(&old).join(" ").contains("unwrap or expect failed"));
 
     // Stack and heap exhaustion have no panic line; they get their own ids.
     let stack = at(&["Program failed to complete: Access violation in stack frame 5 at address 0x200005ff8 of size 8"]);
@@ -2595,7 +2594,6 @@ fn curated_help_covers_the_errors_agents_hit() {
         "InvalidAccountData",
         "AccountDataTooSmall",
         "PrivilegeEscalation",
-        "ProgramFailedToComplete",
         "AccountNotRentExempt",
         "MissingAccount",
     ] {

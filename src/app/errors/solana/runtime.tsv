@@ -74,7 +74,7 @@ InvalidRealloc	failed to reallocate account data of this length		the realloc exc
 ComputationalBudgetExceeded	the instruction ran out of compute units		
 PrivilegeEscalation	a CPI asked for more privileges than the caller had		a CPI passed an account as signer or writable that the caller had no right to — invoke_signed with the right seeds, or mark it signer/mut on the outer instruction
 ProgramEnvironmentSetupFailure	the program could not be loaded		the program could not be loaded — on localnet it is usually not deployed, or built for a different SBF toolchain; redeploy
-ProgramFailedToComplete	the program aborted — panic, unwrap, or compute exhaustion		the program aborted — the last program log lines say why: a panic, compute, stack or heap
+ProgramFailedToComplete	the program aborted — panic, unwrap, or compute exhaustion		
 ProgramFailedToCompile	program failed to compile		the deployed program is not a loadable BPF binary — rebuild and redeploy
 Immutable	account is immutable		the account is immutable — it cannot be changed after creation
 IncorrectAuthority	incorrect authority provided	Unauthorized	the signer is not the authority this account stores

@@ -398,15 +398,18 @@ fn diagnosis(tx: &Tx, failure: &Failure) -> Vec<String> {
             Confidence::Likely => " (inferred)",
             Confidence::Certain => "",
         };
-        let values = match (&note.expected, &note.actual) {
-            (Some(expected), Some(actual)) => format!(" — expected `{expected}`, got `{actual}`"),
-            (Some(expected), None) => format!(" — expected `{expected}`"),
-            (None, Some(actual)) => format!(" — got `{actual}`"),
-            (None, None) => String::new(),
-        };
-        format!("- {tier}: {}{values}{guess}", note.text)
+        format!("- {tier}: {}{}{guess}", note.text, values(note))
     }));
     out
+}
+
+fn values(note: &Note) -> String {
+    match (&note.expected, &note.actual) {
+        (Some(expected), Some(actual)) => format!(" — expected `{expected}`, got `{actual}`"),
+        (Some(expected), None) => format!(" — expected `{expected}`"),
+        (None, Some(actual)) => format!(" — got `{actual}`"),
+        (None, None) => String::new(),
+    }
 }
 
 /// Fetches a transaction and diagnoses it the way the TUI does, without one.
@@ -476,6 +479,24 @@ pub fn json(tx: &Tx) -> Value {
         .chain(failure.notes.iter().map(|note| (&note.id, None)))
         .find_map(|(id, class)| Some((id, action(id, class)?)))
         .unwrap_or((&failure.id, ("fix_transaction", false)));
+    // Most specific first: the finding that confirms the class, any fix, what
+    // the logs said, then the error table's generic help.
+    let confirms = |note: &&Note| match (&note.id, failure.class) {
+        (DiagnosticId::Finding { kind, .. }, Some(class)) => corroborates(class, *kind),
+        _ => false,
+    };
+    let fix = failure
+        .notes
+        .iter()
+        .find(confirms)
+        .or_else(|| failure.notes.iter().find(|note| note.tier == Tier::Fix))
+        .or_else(|| {
+            failure
+                .notes
+                .iter()
+                .find(|note| note.tier == Tier::Help && matches!(note.id, DiagnosticId::Log(_)))
+        })
+        .or_else(|| failure.notes.iter().find(|note| note.tier == Tier::Help));
     let certainty = failure
         .notes
         .iter()
@@ -486,20 +507,9 @@ pub fn json(tx: &Tx) -> Value {
                 .iter()
                 .find(|note| note.id == DiagnosticId::Log(LogId::ClassInferred))
         })
+        .or(fix)
         .map(|note| note.confidence);
-    // The finding that confirms the error's class is the fix; failing that,
-    // any fix, then the generic help.
-    let confirms = |note: &&Note| match (&note.id, failure.class) {
-        (DiagnosticId::Finding { kind, .. }, Some(class)) => corroborates(class, *kind),
-        _ => false,
-    };
-    let fix = failure
-        .notes
-        .iter()
-        .find(confirms)
-        .or_else(|| failure.notes.iter().find(|note| note.tier == Tier::Fix))
-        .or_else(|| failure.notes.iter().find(|note| note.tier == Tier::Help))
-        .map(|note| note.text.clone());
+    let fix = fix.map(|note| format!("{}{}", note.text, values(note)));
 
     let node = failure.node.map(|index| &tx.nodes[index]);
     let names = failure.node.map(|index| names(tx, index)).unwrap_or_default();
@@ -508,8 +518,8 @@ pub fn json(tx: &Tx) -> Value {
         .node
         .map(|index| tx.ancestors(index)[0])
         .filter(|top| Some(*top) != failure.node)
-        .map(|top| &tx.nodes[top])
         .map(|top| {
+            let top = &tx.nodes[top];
             json!({
                 "instruction": top.name.clone().unwrap_or_else(|| top.label.clone()),
                 "instruction_path": top.path,
