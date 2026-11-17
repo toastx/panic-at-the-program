@@ -100,7 +100,11 @@ pub fn fetch_account(cluster: &str, pubkey: &str) -> Result<Value, Box<dyn Error
     if let Some(value) = load(cluster, &key) {
         return Ok(value);
     }
-    let value = rpc(cluster, "getAccountInfo", json!([pubkey, {"encoding": "base64"}]))?;
+    let value = rpc(
+        cluster,
+        "getAccountInfo",
+        json!([pubkey, {"encoding": "base64", "commitment": "confirmed"}]),
+    )?;
     if value.pointer("/result/value").is_none_or(Value::is_null) {
         return Err(format!("account not found on {cluster}").into());
     }
@@ -112,7 +116,7 @@ pub fn accounts_info_sparse(cluster: &str, addresses: &[String]) -> Result<Vec<O
     let value = rpc(
         cluster,
         "getMultipleAccounts",
-        json!([addresses, {"encoding": "base64"}]),
+        json!([addresses, {"encoding": "base64", "commitment": "confirmed"}]),
     )?;
     Ok(value
         .pointer("/result/value")

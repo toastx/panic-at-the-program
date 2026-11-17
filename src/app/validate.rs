@@ -47,14 +47,13 @@ pub struct Finding {
     pub actual: Option<String>,
 }
 
-/// What the failure already says. The state checks look for the evidence that
-/// would confirm it, rather than reporting every fact about every account.
-#[derive(Default, Clone, Debug)]
+/// What the failure says: its class, Anchor's Left/Right pair, the account it named.
+#[derive(Default)]
 pub struct Context {
     pub class: Option<Class>,
-    /// The `Left:`/`Right:` pair Anchor logged, when it did.
     pub expected: Option<String>,
     pub actual: Option<String>,
+    pub account: Option<String>,
 }
 
 pub fn check(cluster: &str, tx: &Tx, index: usize) -> Vec<Finding> {
@@ -82,6 +81,7 @@ pub fn check(cluster: &str, tx: &Tx, index: usize) -> Vec<Finding> {
             class: failure.class,
             expected: mismatch.and_then(|note| note.expected.clone()),
             actual: mismatch.and_then(|note| note.actual.clone()),
+            account: failure.account.clone(),
         }
     });
     let keys: Vec<String> = node.accounts.iter().map(|a| a.key.clone()).collect();
@@ -124,8 +124,8 @@ pub fn declared_findings(specs: &[idl::AccountSpec], node: &Node) -> Vec<Finding
                 node.accounts.len(),
                 missing.join(", ")
             ),
-            expected: Some(format!("{} accounts", specs.len())),
-            actual: Some(node.accounts.len().to_string()),
+            expected: None,
+            actual: None,
         }];
     }
     let mut findings = Vec::new();
@@ -228,6 +228,10 @@ pub fn state_findings(
     let spend = token_spend(node);
     for (i, account) in node.accounts.iter().enumerate() {
         let role = roles.get(i).cloned().unwrap_or_default();
+        // Anchor names the account it rejected; the class checks look at it alone.
+        let class = context
+            .class
+            .filter(|_| context.account.as_ref().is_none_or(|named| *named == role));
         let finding = |kind, level, message: String, expected, actual| Finding {
             index: i,
             role: role.clone(),
@@ -240,7 +244,7 @@ pub fn state_findings(
         };
 
         let Some(info) = state.get(&account.key) else {
-            if context.class == Some(Class::Uninitialized) {
+            if class == Some(Class::Uninitialized) {
                 findings.push(finding(
                     FindingKind::Missing,
                     Level::Error,
@@ -253,23 +257,22 @@ pub fn state_findings(
         };
 
         // An `init` target is writable and never signs; the payer signs.
-        if context.class == Some(Class::Already) && account.writable && !account.signer {
+        if class == Some(Class::Already) && account.writable && !account.signer {
             findings.push(finding(
                 FindingKind::Exists,
                 Level::Error,
                 format!("already exists, owned by {}", program_name(&info.owner)),
                 None,
-                Some(program_name(&info.owner)),
+                None,
             ));
         }
 
-        // With Anchor's Left/Right logged, only the account with that owner;
-        // without, the accounts the instruction writes to and does not own.
-        let blamed = match &context.actual {
-            Some(owner) => info.owner == *owner,
-            None => account.writable && info.owner != node.program,
+        let blamed = match (&context.account, &context.actual) {
+            (Some(_), _) => true,
+            (None, Some(owner)) => info.owner == *owner,
+            (None, None) => account.writable && info.owner != node.program,
         };
-        if context.class == Some(Class::WrongOwner) && blamed {
+        if class == Some(Class::WrongOwner) && blamed {
             findings.push(finding(
                 FindingKind::WrongOwner,
                 Level::Error,
@@ -279,26 +282,15 @@ pub fn state_findings(
             ));
         }
 
-        if context.class == Some(Class::Layout)
+        if class == Some(Class::Layout)
             && info.owner == node.program
             && let Some(idl) = idl
         {
-            findings.push(match idl::account(idl, &info.data) {
-                Some((name, _)) => finding(
-                    FindingKind::HoldsType,
-                    Level::Error,
-                    format!("holds a `{name}`"),
-                    None,
-                    Some(name),
-                ),
-                None => finding(
-                    FindingKind::HoldsType,
-                    Level::Error,
-                    format!("holds {} bytes that match no account type in the IDL", info.data.len()),
-                    None,
-                    None,
-                ),
-            });
+            let message = match idl::account(idl, &info.data) {
+                Some((name, _)) => format!("holds a `{name}`"),
+                None => format!("holds {} bytes that match no account type in the IDL", info.data.len()),
+            };
+            findings.push(finding(FindingKind::HoldsType, Level::Error, message, None, None));
         }
 
         if (info.owner == TOKEN || info.owner == TOKEN_2022) && info.data.len() == 165 {
@@ -319,7 +311,7 @@ pub fn state_findings(
                     ));
                 }
             }
-            if context.class == Some(Class::Mint) && context.actual.as_ref().is_none_or(|actual| *actual == mint) {
+            if class == Some(Class::Mint) && context.actual.as_ref().is_none_or(|actual| *actual == mint) {
                 findings.push(finding(
                     FindingKind::TokenMint,
                     Level::Error,
@@ -337,8 +329,7 @@ pub fn state_findings(
                     None,
                 ));
             }
-            // The source of a token spend: what it holds against what moves,
-            // and whether the authority passed may move it at all.
+            // A spend's source: its balance against the amount, its owner against the authority.
             if i == 0
                 && let Some((moved, decimals, authority_slot)) = spend
             {

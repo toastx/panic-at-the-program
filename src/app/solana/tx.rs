@@ -387,7 +387,16 @@ pub fn parse(signature: &str, cluster: &str, value: &Value) -> Tx {
     };
 
     let cu = result["meta"]["computeUnitsConsumed"].as_u64().unwrap_or(0) as u32;
-    let cu_limit = if cu_limit == 0 { 200_000 } else { cu_limit };
+    // A requested limit is the transaction's; a frame's budget is only what
+    // was left when it started.
+    let requested = nodes
+        .iter()
+        .filter(|node| node.depth == 0 && node.program == "ComputeBudget111111111111111111111111111111")
+        .find_map(|node| match decode_instruction(&node.program, &node.data)? {
+            (name, fields) if name == "SetComputeUnitLimit" => fields.first()?.1.parse().ok(),
+            _ => None,
+        });
+    let cu_limit = requested.unwrap_or(if cu_limit == 0 { 200_000 } else { cu_limit });
     let failure = crate::app::diagnose::failure(&result["meta"]["err"], &nodes, &logs, cu, cu_limit);
     let failed_node = failed_node.or_else(|| failure.as_ref().and_then(|f| f.node));
 

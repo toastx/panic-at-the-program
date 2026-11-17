@@ -3,9 +3,7 @@
 use super::*;
 use crate::app::errors::Class;
 
-/// What a program's panic said, and where it was.
 pub struct Panic {
-    /// `file:line`, the way Anchor's `thrown in` reads.
     pub source: Option<String>,
     pub message: String,
 }
@@ -20,11 +18,11 @@ impl Panic {
                 Some(Class::Overflow),
             );
         }
-        if text.contains("unwrap()") && text.contains("none") {
-            return ("an unwrap on None — handle the missing value or return an error", None);
-        }
         if text.contains("unwrap()") || text.contains("expect()") {
-            return ("an unwrap on an Err — propagate it with ? or return an error", None);
+            return (
+                "an unwrap or expect failed — handle the None/Err or return an error",
+                None,
+            );
         }
         if text.contains("out of bounds") || text.contains("range end index") || text.contains("range start index") {
             return (
@@ -39,13 +37,8 @@ impl Panic {
 /// `file:line:col` without the column, the way Anchor's `thrown in` reads.
 fn location(text: &str) -> Option<String> {
     let text = text.trim().trim_end_matches(':');
-    let parts: Vec<&str> = text.split(':').collect();
-    let numeric = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
-    match parts.as_slice() {
-        [] | [""] => None,
-        [.., line, col] if numeric(line) && numeric(col) => Some(parts[..parts.len() - 1].join(":")),
-        _ => Some(text.to_string()),
-    }
+    let head = text.rsplit_once(':').filter(|(_, col)| col.parse::<u32>().is_ok());
+    Some(head.map_or(text, |(head, _)| head).to_string()).filter(|path| !path.is_empty())
 }
 
 /// The panic a program logged, in either shape Rust has used:

@@ -193,9 +193,7 @@ pub struct AccountSpec {
     pub writable: bool,
     pub address: Option<String>,
     pub seeds: Option<Vec<Seed>>,
-    /// The program the PDA is derived under, when it is not this one: an ATA
-    /// is derived under the Associated Token program, a fee config under the
-    /// fee program. None means the instruction's own program.
+    /// Derive under this program instead of the instruction's own (an ATA's).
     pub pda_program: Option<Seed>,
 }
 
@@ -837,17 +835,16 @@ pub fn enrich(tx: &mut solana::Tx) {
     let program = tx.nodes[node].program.clone();
     let logs = tx.logs[tx.nodes[node].logs.clone()].to_vec();
     let parsed = idl(&cluster, &program);
-    // Resolved before the failure is borrowed mutably, and only when the account
-    // list is known to be whole: partial lists produce bogus findings. A CPI
-    // that failed is checked twice: the callee's accounts, and the top-level
-    // instruction the user wrote, whose IDL declares what each one must be.
+    // Only on a whole account list, else findings are bogus. A failed CPI is
+    // also checked against the top-level instruction, whose IDL has the roles.
     let top = tx.ancestors(node)[0];
     let check = |index: usize| match tx.accounts_complete {
         true => super::validate::check(&cluster, tx, index),
         false => Vec::new(),
     };
     let findings = check(node);
-    let caller = if top != node { check(top) } else { Vec::new() };
+    let mut caller = if top != node { check(top) } else { Vec::new() };
+    caller.retain(|c| !findings.iter().any(|f| f.kind == c.kind && f.key == c.key));
 
     let Some(failure) = tx.failure.as_mut() else { return };
     if let super::diagnose::Code::Custom(code) = failure.code {
